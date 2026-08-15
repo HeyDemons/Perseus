@@ -38,16 +38,20 @@
     "status": "completed",
     "host": "Apple silicon",
     "docker_runtime": "Colima ARM64",
-    "checkout_names": ["evaluation-control", "speculative-agent"],
-    "execution_seconds": 7.82,
+    "source": "fresh public GitHub clones",
+    "checkout_names": ["control-plane", "agent-runtime"],
+    "execution_seconds": 8.388,
+    "agent_execution_seconds": 8.133,
     "scores": {
       "exact_file": 1.0,
       "tool_contract": 1.0,
       "speculative_path": 1.0,
       "end_to_end": 1.0
     },
+    "candidate_prelaunched": 3,
     "cache_hits": 2,
     "cache_misses": 1,
+    "candidate_discarded": 1,
     "malformed_rows": 0
   }
 }
