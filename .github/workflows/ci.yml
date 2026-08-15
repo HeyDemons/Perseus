@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  protocol:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.19.0"
+          cache: npm
+          cache-dependency-path: harness/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: harness
+      - run: npm run check
+        working-directory: harness
+      - name: Run PERSEUS lossless protocol test
+        working-directory: harness
+        run: >-
+          ./node_modules/.bin/tsx
+          --tsconfig tsconfig.json
+          packages/agent/test/perseus-runtime.test.ts
+      - name: Validate HarnessEval adapter and JSON contracts
+        run: |
+          python3 -m py_compile integrations/harnesseval/adapter.py
+          python3 -m json.tool integrations/harnesseval/catalog.json >/dev/null
+          python3 -m json.tool integrations/harnesseval/smoke/request.json >/dev/null
+          bash -n perseus scripts/*.sh tests/*.sh integrations/harnesseval/*.sh

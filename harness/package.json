@@ -1,0 +1,45 @@
+{
+	"name": "perseus",
+	"private": true,
+	"type": "module",
+	"workspaces": [
+		"packages/*"
+	],
+	"scripts": {
+		"clean": "npm run clean --workspaces --if-present",
+		"build": "npm --workspace @earendil-works/pi-tui run build && npm --workspace @earendil-works/pi-ai run build && npm --workspace @earendil-works/pi-agent-core run build && npm --workspace @earendil-works/pi-coding-agent run build",
+		"check": "npm run typecheck && npm run check:ts-imports",
+		"check:ts-imports": "node scripts/check-ts-relative-imports.mjs",
+		"typecheck": "tsgo --noEmit",
+		"profile:tui": "node scripts/profile-coding-agent-node.mjs --mode tui",
+		"profile:rpc": "node scripts/profile-coding-agent-node.mjs --mode rpc",
+		"version:patch": "npm version patch -ws --no-git-tag-version && node scripts/sync-versions.js && npm install --package-lock-only --ignore-scripts",
+		"version:minor": "npm version minor -ws --no-git-tag-version && node scripts/sync-versions.js && npm install --package-lock-only --ignore-scripts",
+		"version:major": "npm version major -ws --no-git-tag-version && node scripts/sync-versions.js && npm install --package-lock-only --ignore-scripts",
+		"version:set": "npm version -ws",
+		"prepublishOnly": "npm run clean && npm run build && npm run check"
+	},
+	"devDependencies": {
+		"@anthropic-ai/sandbox-runtime": "0.0.26",
+		"@biomejs/biome": "2.3.5",
+		"@types/node": "22.19.19",
+		"@typescript/native-preview": "7.0.0-dev.20260120.1",
+		"esbuild": "0.28.1",
+		"husky": "9.1.7",
+		"jiti": "2.7.0",
+		"shx": "0.4.0",
+		"tsx": "4.22.1",
+		"typescript": "5.9.3"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"version": "0.0.3",
+	"overrides": {
+		"shell-quote": "1.8.4",
+		"rimraf": "6.1.2",
+		"gaxios": {
+			"rimraf": "6.1.2"
+		}
+	}
+}

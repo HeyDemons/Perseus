@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "task": {
+    "id": "read-sum",
+    "prompt": "Use the read tool to read both /workspace/left.txt and /workspace/right.txt. Add the two integers. Use the write tool to write only the decimal sum to /job/answer.txt, then report the result. Do not use a shell command."
+  },
+  "tools": ["read", "write"],
+  "safe_tools": ["read"],
+  "working_directory": "/workspace",
+  "answer_file": "/job/answer.txt",
+  "expected": "42"
+}

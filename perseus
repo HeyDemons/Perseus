@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+RELEASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ORIGINAL_CWD="$(pwd)"
+
+PERSEUS_ACTOR_PROVIDER="${PERSEUS_ACTOR_PROVIDER:-openai-compatible}"
+PERSEUS_ACTOR_MODEL="${PERSEUS_ACTOR_MODEL:-}"
+PERSEUS_ACTOR_BASE_URL="${PERSEUS_ACTOR_BASE_URL:-}"
+PERSEUS_ACTOR_API_TYPE="${PERSEUS_ACTOR_API_TYPE:-openai-completions}"
+PERSEUS_ACTOR_API_KEY="${PERSEUS_ACTOR_API_KEY:-}"
+PERSEUS_ACTOR_THINKING="${PERSEUS_ACTOR_THINKING:-high}"
+PERSEUS_SPECULATOR_PROVIDER="${PERSEUS_SPECULATOR_PROVIDER:-${PERSEUS_ACTOR_PROVIDER}}"
+PERSEUS_SPECULATOR_MODEL="${PERSEUS_SPECULATOR_MODEL:-${PERSEUS_ACTOR_MODEL}}"
+PERSEUS_SPECULATOR_BASE_URL="${PERSEUS_SPECULATOR_BASE_URL:-${PERSEUS_ACTOR_BASE_URL}}"
+PERSEUS_SPECULATOR_API_TYPE="${PERSEUS_SPECULATOR_API_TYPE:-${PERSEUS_ACTOR_API_TYPE}}"
+PERSEUS_SPECULATOR_API_KEY="${PERSEUS_SPECULATOR_API_KEY:-${PERSEUS_ACTOR_API_KEY}}"
+PERSEUS_SAFE_TOOLS="${PERSEUS_SAFE_TOOLS:-read,grep,find,ls}"
+PERSEUS_ENABLED="${PERSEUS_ENABLED:-1}"
+
+if [[ "${PERSEUS_ENABLED}" != "0" && "${PERSEUS_ENABLED}" != "1" ]]; then
+  echo "PERSEUS_ENABLED must be 0 or 1." >&2
+  exit 2
+fi
+
+if [[ -z "${PERSEUS_ACTOR_MODEL}" || -z "${PERSEUS_ACTOR_BASE_URL}" || -z "${PERSEUS_ACTOR_API_KEY}" ]]; then
+  echo "PERSEUS_ACTOR_MODEL, PERSEUS_ACTOR_BASE_URL, and PERSEUS_ACTOR_API_KEY are required." >&2
+  exit 2
+fi
+
+for argument in "$@"; do
+  case "${argument}" in
+    --provider|--provider=*|--model|--model=*|--api-key|--api-key=*|--thinking|--thinking=*)
+      echo "Provider/model/thinking are configured through PERSEUS_* variables; unsupported override: ${argument}" >&2
+      exit 2
+      ;;
+  esac
+done
+
+export PERSEUS_ENABLED
+export PERSEUS_ACTOR_PROVIDER PERSEUS_ACTOR_MODEL PERSEUS_ACTOR_BASE_URL PERSEUS_ACTOR_API_TYPE PERSEUS_ACTOR_API_KEY PERSEUS_ACTOR_THINKING
+export PERSEUS_SPECULATOR_PROVIDER PERSEUS_SPECULATOR_MODEL PERSEUS_SPECULATOR_BASE_URL PERSEUS_SPECULATOR_API_TYPE PERSEUS_SPECULATOR_API_KEY
+export PERSEUS_SAFE_TOOLS
+
+RUNTIME_HARNESS="$(bash "${RELEASE}/scripts/prepare-harness-runtime.sh")"
+STATE_ROOT="${PERSEUS_STATE_DIR:-${XDG_STATE_HOME:-${HOME}/.local/state}/perseus}"
+mkdir -p "${STATE_ROOT}"
+STATE_ROOT="$(cd "${STATE_ROOT}" && pwd)"
+AGENT_DIR="${STATE_ROOT}/agent"
+node "${RELEASE}/scripts/configure-agent.mjs" "${AGENT_DIR}"
+export PI_AGENT_DIR="${AGENT_DIR}"
+export PI_CODING_AGENT_DIR="${AGENT_DIR}"
+export PI_OFFLINE=1
+
+cd "${ORIGINAL_CWD}"
+exec "${RUNTIME_HARNESS}/node_modules/.bin/tsx" \
+  --tsconfig "${RUNTIME_HARNESS}/tsconfig.json" \
+  "${RUNTIME_HARNESS}/packages/coding-agent/src/cli.ts" \
+  --provider "${PERSEUS_ACTOR_PROVIDER}" \
+  --model "${PERSEUS_ACTOR_MODEL}" \
+  --thinking "${PERSEUS_ACTOR_THINKING}" \
+  "$@"

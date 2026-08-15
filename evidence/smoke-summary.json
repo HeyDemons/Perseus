@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-15",
+  "scope": "protocol and HarnessEval integration evidence; not a benchmark score",
+  "protocol_test": {
+    "status": "passed",
+    "assertions": [
+      "exact hit starts before Actor resolution",
+      "exact hit executes the tool once",
+      "argument miss preserves Actor execution",
+      "unsafe candidate never prelaunches"
+    ]
+  },
+  "harnesseval_smoke": {
+    "status": "completed",
+    "execution_seconds": 6.884,
+    "scores": {
+      "exact_file": 1.0,
+      "tool_contract": 1.0,
+      "speculative_path": 1.0,
+      "end_to_end": 1.0
+    },
+    "tool_calls": ["read", "read", "write"],
+    "agent_event_rows": 137,
+    "speculative_trace_rows": 24,
+    "malformed_rows": 0,
+    "mechanism": {
+      "prediction_started": 3,
+      "prediction_completed": 3,
+      "candidate_prelaunched": 2,
+      "cache_hit": 2,
+      "cache_miss": 1,
+      "prediction_late": 2,
+      "candidate_discarded": 0
+    }
+  }
+}

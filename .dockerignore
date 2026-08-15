@@ -1,0 +1,10 @@
+.git
+.env
+.env.local
+node_modules
+runs
+__pycache__
+*.pyc
+.DS_Store
+*.tgz
+*.tar.gz
