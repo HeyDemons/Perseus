@@ -33,5 +33,21 @@
       "prediction_late": 2,
       "candidate_discarded": 0
     }
+  },
+  "macos_reproduction": {
+    "status": "completed",
+    "host": "Apple silicon",
+    "docker_runtime": "Colima ARM64",
+    "checkout_names": ["evaluation-control", "speculative-agent"],
+    "execution_seconds": 7.82,
+    "scores": {
+      "exact_file": 1.0,
+      "tool_contract": 1.0,
+      "speculative_path": 1.0,
+      "end_to_end": 1.0
+    },
+    "cache_hits": 2,
+    "cache_misses": 1,
+    "malformed_rows": 0
   }
 }

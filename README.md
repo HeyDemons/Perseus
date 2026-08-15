@@ -78,7 +78,8 @@ bash integrations/harnesseval/run-smoke.sh
 
 The smoke performs a real API, Speculator, Actor, read tools, write tool, and
 exact-file scorer loop. See [the integration guide](docs/HARNESSEVAL.md) for
-benchmark images, tool injection, matched controls, and result fields.
+benchmark images, host compatibility, tool injection, matched controls, and
+result fields.
 
 ## Architecture
 

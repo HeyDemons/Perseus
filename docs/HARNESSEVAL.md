@@ -1,6 +1,6 @@
 # HarnessEval Integration
 
-HarnessEval and PERSEUS keep separate ownership boundaries:
+HarnessEval 0.1.1 or newer and PERSEUS keep separate ownership boundaries:
 
 - HarnessEval selects the benchmark case, builds or verifies the task image,
   passes named credentials, isolates attempts, resumes completed cases, keeps
@@ -16,11 +16,39 @@ infrastructure task. It builds PERSEUS into a Node image, asks the Actor to read
 two files and write their sum, then checks the artifact, real tool events, and
 Speculator trace. It is an oracle smoke, not a benchmark score.
 
+On macOS, the two checkouts may use arbitrary directory names:
+
+```bash
+mkdir -p "$HOME/perseus-eval"
+cd "$HOME/perseus-eval"
+git clone https://github.com/HuiCir/HarnessEval.git evaluation-control
+git clone https://github.com/HuiCir/Perseus.git speculative-agent
+python3.12 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e evaluation-control
+```
+
 With HarnessEval installed and the required `PERSEUS_ACTOR_*` variables set:
 
 ```bash
-bash integrations/harnesseval/run-smoke.sh runs/harnesseval-smoke
+bash speculative-agent/integrations/harnesseval/run-smoke.sh \
+  "$HOME/perseus-eval/runs/harnesseval-smoke"
 ```
+
+The catalog resolves files relative to its own checkout, so PERSEUS may be
+cloned under any directory name. The Docker image builds natively from the
+multi-architecture `node:22-bookworm-slim` base on Linux amd64 or ARM64. macOS
+uses Docker Desktop or Colima. No GPU is required.
+
+Keep both checkouts and `RUN_DIR` under a macOS directory shared with the
+Docker VM, preferably below `$HOME`. Colima may not expose arbitrary `/tmp`
+paths with writable ownership inside containers.
+
+HarnessEval automatically pulls the base image. On a restricted network, the
+Docker daemon still needs its own registry proxy or mirror. Set
+`BENCHMARK_BUILD_PROXY` only for network access needed by Dockerfile build
+steps; it does not configure registry pulls made by the daemon, and the proxy
+address must be reachable from inside the Docker VM.
 
 HarnessEval stores the complete attempt under:
 

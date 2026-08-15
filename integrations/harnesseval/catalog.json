@@ -11,13 +11,13 @@
       "adapter": {
         "kind": "docker-image",
         "image": "perseus:harnesseval-smoke",
-        "dockerfile": "${ORCH_ROOT}/Perseus/integrations/harnesseval/Dockerfile",
-        "build_context": "${ORCH_ROOT}/Perseus",
+        "dockerfile": "${CATALOG_DIR}/Dockerfile",
+        "build_context": "${CATALOG_DIR}/../..",
         "fingerprint_paths": [
-          "${ORCH_ROOT}/Perseus/harness",
-          "${ORCH_ROOT}/Perseus/perseus",
-          "${ORCH_ROOT}/Perseus/scripts",
-          "${ORCH_ROOT}/Perseus/integrations/harnesseval"
+          "${CATALOG_DIR}/../../harness",
+          "${CATALOG_DIR}/../../perseus",
+          "${CATALOG_DIR}/../../scripts",
+          "${CATALOG_DIR}"
         ],
         "pre_pull": ["node:22-bookworm-slim"],
         "read_only": false,
