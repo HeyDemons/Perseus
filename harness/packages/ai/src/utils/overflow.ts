@@ -132,8 +132,11 @@ export function isContextOverflow(message: AssistantMessage, contextWindow?: num
 		}
 	}
 
-	// Case 2: Silent overflow (z.ai style) - successful but usage exceeds context
-	if (contextWindow && message.stopReason === "stop") {
+	// Case 2: Silent overflow is a provider-specific z.ai behavior. Other providers
+	// may report cache accounting that exceeds the configured context window even
+	// after returning a valid response; compacting and retrying that response would
+	// discard a completed turn and attempt to continue from an assistant message.
+	if (contextWindow && message.provider === "zai" && message.stopReason === "stop") {
 		const inputTokens = message.usage.input + message.usage.cacheRead;
 		if (inputTokens > contextWindow) {
 			return true;

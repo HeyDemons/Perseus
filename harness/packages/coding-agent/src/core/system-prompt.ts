@@ -24,6 +24,21 @@ export interface BuildSystemPromptOptions {
 	skills?: Skill[];
 }
 
+function currentDate(): string {
+	const configured = process.env.PI_SYSTEM_DATE?.trim();
+	if (configured) {
+		if (!/^\d{4}-\d{2}-\d{2}$/.test(configured)) {
+			throw new Error("PI_SYSTEM_DATE must use YYYY-MM-DD format");
+		}
+		return configured;
+	}
+	const now = new Date();
+	const year = now.getFullYear();
+	const month = String(now.getMonth() + 1).padStart(2, "0");
+	const day = String(now.getDate()).padStart(2, "0");
+	return `${year}-${month}-${day}`;
+}
+
 /** Build the system prompt with tools, guidelines, and context */
 export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const {
@@ -39,11 +54,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const resolvedCwd = cwd;
 	const promptCwd = resolvedCwd.replace(/\\/g, "/");
 
-	const now = new Date();
-	const year = now.getFullYear();
-	const month = String(now.getMonth() + 1).padStart(2, "0");
-	const day = String(now.getDate()).padStart(2, "0");
-	const date = `${year}-${month}-${day}`;
+	const date = currentDate();
 
 	const appendSection = appendSystemPrompt ? `\n\n${appendSystemPrompt}` : "";
 

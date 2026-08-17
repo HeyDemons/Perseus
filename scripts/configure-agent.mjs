@@ -31,17 +31,35 @@ if (speculator.provider !== actor.provider && !process.env.PERSEUS_SPECULATOR_AP
 	throw new Error("PERSEUS_SPECULATOR_API_KEY is required for a separate speculator provider");
 }
 
-function compat(reasoning) {
+function thinkingFormat(config) {
+	if (config.provider === "deepseek") return "deepseek";
+	try {
+		const hostname = new URL(config.baseUrl).hostname.toLowerCase();
+		if (hostname === "deepseek.com" || hostname.endsWith(".deepseek.com")) return "deepseek";
+	} catch {
+		// The required base URL is validated by the provider when the request starts.
+	}
+	return undefined;
+}
+
+function supportsReasoning(config, requested) {
+	return requested || thinkingFormat(config) !== undefined;
+}
+
+function compat(config, reasoning) {
+	const format = thinkingFormat(config);
 	return {
 		supportsStore: false,
 		supportsDeveloperRole: false,
 		supportsReasoningEffort: reasoning,
 		maxTokensField: "max_tokens",
 		supportsStrictMode: false,
+		...(format ? { thinkingFormat: format } : {}),
 	};
 }
 
-function modelEntry(config, reasoning) {
+function modelEntry(config, requestedReasoning) {
+	const reasoning = supportsReasoning(config, requestedReasoning);
 	const configuredMaxTokens = Number.parseInt(process.env.PERSEUS_MAX_TOKENS || "", 10);
 	return {
 		id: config.model,
@@ -53,17 +71,18 @@ function modelEntry(config, reasoning) {
 			? { maxTokens: configuredMaxTokens }
 			: {}),
 		contextWindow: Number.parseInt(process.env.PERSEUS_CONTEXT_WINDOW || "128000", 10),
-		compat: compat(reasoning),
+		compat: compat(config, reasoning),
 	};
 }
 
 const actorReasoning = (process.env.PERSEUS_ACTOR_THINKING || "off").trim().toLowerCase() !== "off";
 const providers = {};
+const actorSupportsReasoning = supportsReasoning(actor, actorReasoning);
 providers[actor.provider] = {
 	baseUrl: actor.baseUrl,
 	apiKey: `$${actor.keyEnv}`,
 	api: actor.api,
-	compat: compat(actorReasoning),
+	compat: compat(actor, actorSupportsReasoning),
 	models: [modelEntry(actor, actorReasoning)],
 };
 if (speculator.provider === actor.provider) {
@@ -75,7 +94,7 @@ if (speculator.provider === actor.provider) {
 		baseUrl: speculator.baseUrl,
 		apiKey: `$${speculator.keyEnv}`,
 		api: speculator.api,
-		compat: compat(false),
+		compat: compat(speculator, supportsReasoning(speculator, false)),
 		models: [modelEntry(speculator, false)],
 	};
 }

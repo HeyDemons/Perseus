@@ -59,7 +59,12 @@ def atomic_json(path: Path, value: Any) -> None:
     os.replace(temporary, path)
 
 
-def request_json(url: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def request_json(
+    url: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    timeout: float | None = 10,
+) -> dict[str, Any]:
     data = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(
         url,
@@ -67,8 +72,12 @@ def request_json(url: str, payload: dict[str, Any] | None = None) -> dict[str, A
         headers={"Content-Type": "application/json"},
         method="GET" if payload is None else "POST",
     )
-    with urllib.request.urlopen(request, timeout=10) as response:
-        value = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            value = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code} from {url}: {body}") from exc
     if not isinstance(value, dict):
         raise TypeError(f"Expected JSON object from {url}")
     return value
@@ -78,7 +87,7 @@ def wait_manifest(url: str, process: subprocess.Popen[str], log_path: Path) -> d
     while process.poll() is None:
         try:
             return request_json(f"{url}/manifest")
-        except (OSError, urllib.error.URLError, json.JSONDecodeError):
+        except (OSError, urllib.error.URLError, json.JSONDecodeError, RuntimeError):
             time.sleep(0.1)
     details = log_path.read_text(encoding="utf-8", errors="replace") if log_path.is_file() else ""
     raise RuntimeError(f"Benchmark tool server exited before becoming ready: {details}")
@@ -329,7 +338,7 @@ def start_tool_server(
             if benchmark.id == "vitabench"
             else "benchmark_platform.bridges.tau_product_server"
         )
-        policy = {"native_evaluate": benchmark.id == "tau2"}
+        policy = {"native_evaluate": True}
         command.extend(
             [
                 "-e", "HARNESS_API_BASE", "-e", "HARNESS_API_KEY", "-e", "HARNESS_MODEL",
@@ -587,6 +596,12 @@ def run_mode(
         shutil.rmtree(mode_dir)
     mode_dir.mkdir(parents=True)
     handle: ToolServerHandle | None = None
+    system_prompt_source = (
+        Path(__file__).resolve().parents[2]
+        / "harness/packages/coding-agent/src/core/system-prompt.ts"
+    )
+    if not system_prompt_source.is_file():
+        raise FileNotFoundError(f"PERSEUS system prompt source not found: {system_prompt_source}")
     try:
         handle = (
             start_task_tool_server(
@@ -605,55 +620,128 @@ def run_mode(
             )
         )
         server_url = handle.url
-        manifest = request_json(f"{server_url}/manifest")
-        manifest_path = mode_dir / "tool_manifest.json"
-        atomic_json(manifest_path, manifest)
-        tools = [str(item["name"]) for item in manifest["tools"]]
-        safe_tools = [str(item) for item in manifest.get("safe_tools", [])]
         product_endpoint = server_url.replace("127.0.0.1", "host.docker.internal")
         events_path = mode_dir / "perseus-events.jsonl"
         stderr_path = mode_dir / "perseus-stderr.log"
-        command = [
-            "docker", "run", "--rm", "--init", "--network", "bridge",
-            "--add-host", "host.docker.internal:host-gateway",
-            "--read-only", "--tmpfs", "/tmp:rw,exec,nosuid,size=1g",
-            "-e", "HOME=/tmp", "-e", f"PERSEUS_ENABLED={1 if enabled else 0}",
-            "-e", f"PERSEUS_SAFE_TOOLS={','.join(safe_tools)}",
-            "-e", "PERSEUS_STATE_DIR=/tmp/perseus-state",
-            "-e", "PERSEUS_TRACE_FILE=/job/perseus-trace.jsonl",
-            "-e", "HARNESSEVAL_TOOL_MANIFEST=/job/tool_manifest.json",
-            "-e", f"HARNESSEVAL_TOOL_ENDPOINT={product_endpoint}",
-            *egress_flags(platform, "bridge"),
-        ]
-        for name in API_ENV:
-            if name in os.environ:
-                command.extend(["-e", name])
-        command.extend(
-            [
-                "-v", f"{mode_dir}:/job:rw",
-                "-v", f"{extension}:/opt/perseus/integrations/harnesseval/tool_bridge_extension.ts:ro",
-                "-w", "/tmp",
-                image,
-                "/opt/perseus/perseus",
-                "--mode", "json", "--no-session", "--print", "--no-context-files",
-                "--no-skills", "--no-prompt-templates", "--no-builtin-tools",
-                "--extension", "/opt/perseus/integrations/harnesseval/tool_bridge_extension.ts",
-                "--tools", ",".join(tools),
-                "-p", str(manifest["prompt"]),
+        trace_path = mode_dir / "perseus-trace.jsonl"
+        turn_event_paths: list[Path] = []
+        turn_stderr_paths: list[Path] = []
+        turn_trace_paths: list[Path] = []
+        returncodes: list[int] = []
+        agent_seconds = 0.0
+        bridge_result: dict[str, Any] | None = None
+        tools: list[str] = []
+        safe_tools: list[str] = []
+        turn = 0
+
+        while bridge_result is None:
+            turn += 1
+            manifest = request_json(f"{server_url}/manifest")
+            manifest_path = mode_dir / "tool_manifest.json"
+            atomic_json(manifest_path, manifest)
+            atomic_json(mode_dir / f"tool_manifest-turn-{turn:03d}.json", manifest)
+            tools = [str(item["name"]) for item in manifest["tools"]]
+            safe_tools = [str(item) for item in manifest.get("safe_tools", [])]
+            task_system_time = str((manifest.get("metadata") or {}).get("system_time") or "").strip()
+            turn_events = mode_dir / f"perseus-events-turn-{turn:03d}.jsonl"
+            turn_stderr = mode_dir / f"perseus-stderr-turn-{turn:03d}.log"
+            turn_trace = mode_dir / f"perseus-trace-turn-{turn:03d}.jsonl"
+            turn_event_paths.append(turn_events)
+            turn_stderr_paths.append(turn_stderr)
+            turn_trace_paths.append(turn_trace)
+            command = [
+                "docker", "run", "--rm", "--init", "--network", "bridge",
+                "--add-host", "host.docker.internal:host-gateway",
+                "--read-only", "--tmpfs", "/tmp:rw,exec,nosuid,size=1g",
+                "-e", "HOME=/tmp", "-e", f"PERSEUS_ENABLED={1 if enabled else 0}",
+                "-e", f"PERSEUS_SAFE_TOOLS={','.join(safe_tools)}",
+                "-e", "PERSEUS_STATE_DIR=/tmp/perseus-state",
+                "-e", f"PERSEUS_TRACE_FILE=/job/{turn_trace.name}",
+                "-e", "HARNESSEVAL_TOOL_MANIFEST=/job/tool_manifest.json",
+                "-e", f"HARNESSEVAL_TOOL_ENDPOINT={product_endpoint}",
+                *egress_flags(platform, "bridge"),
             ]
+            if task_system_time:
+                command.extend(["-e", f"PI_SYSTEM_DATE={task_system_time.split()[0]}"])
+            for name in API_ENV:
+                if name in os.environ:
+                    command.extend(["-e", name])
+            command.extend(
+                [
+                    "-v", f"{mode_dir}:/job:rw",
+                    "-v", f"{extension}:/opt/perseus/integrations/harnesseval/tool_bridge_extension.ts:ro",
+                    "-v", f"{system_prompt_source}:/opt/perseus/harness/packages/coding-agent/src/core/system-prompt.ts:ro",
+                    "-w", "/tmp",
+                    image,
+                    "/opt/perseus/perseus",
+                    "--mode", "json", "--no-session", "--print", "--no-context-files",
+                    "--no-skills", "--no-prompt-templates", "--no-builtin-tools",
+                    "--extension", "/opt/perseus/integrations/harnesseval/tool_bridge_extension.ts",
+                    "--tools", ",".join(tools),
+                    "-p", str(manifest["prompt"]),
+                ]
+            )
+            started = time.perf_counter()
+            turn_returncode = record_json_stream(command, turn_events, turn_stderr)
+            agent_seconds += time.perf_counter() - started
+            returncodes.append(turn_returncode)
+            turn_rows, _ = jsonl(turn_events)
+            turn_answer = assistant_text(turn_rows)
+            turn_actor = actor_metrics(turn_rows)
+
+            should_continue_native = (
+                benchmark.id in NATIVE_EPISODE_BENCHMARKS
+                and turn_returncode == 0
+                and turn_actor["last_stop_reason"] != "error"
+                and bool(turn_answer.strip())
+                and "###STOP###" not in turn_answer
+            )
+            if should_continue_native:
+                continuation = request_json(
+                    f"{server_url}/turn",
+                    {"content": turn_answer},
+                    timeout=None,
+                )
+                if continuation.get("episode_complete") is not True:
+                    continue
+
+            accumulated_events: list[dict[str, Any]] = []
+            for path in turn_event_paths:
+                rows, _ = jsonl(path)
+                accumulated_events.extend(rows)
+            accumulated_actor = actor_metrics(accumulated_events)
+            bridge_result = request_json(
+                f"{server_url}/final",
+                {
+                    "profile": mode,
+                    "answer": turn_answer,
+                    "committed_calls": accumulated_actor["committed_calls"],
+                },
+                timeout=None,
+            )
+
+        events_path.write_text(
+            "".join(path.read_text(encoding="utf-8", errors="replace") for path in turn_event_paths),
+            encoding="utf-8",
         )
-        started = time.perf_counter()
-        returncode = record_json_stream(command, events_path, stderr_path)
-        agent_seconds = time.perf_counter() - started
+        stderr_path.write_text(
+            "".join(path.read_text(encoding="utf-8", errors="replace") for path in turn_stderr_paths),
+            encoding="utf-8",
+        )
+        trace_path.write_text(
+            "".join(
+                path.read_text(encoding="utf-8", errors="replace")
+                for path in turn_trace_paths
+                if path.is_file()
+            ),
+            encoding="utf-8",
+        )
+        returncode = next((code for code in returncodes if code != 0), returncodes[-1])
         events, malformed_events = jsonl(events_path)
-        trace, malformed_trace = jsonl(mode_dir / "perseus-trace.jsonl")
+        trace, malformed_trace = jsonl(trace_path)
         answer = assistant_text(events)
         score_answer = scorer_answer(benchmark.id, answer)
         actor = actor_metrics(events)
-        bridge_result = request_json(
-            f"{server_url}/final",
-            {"profile": mode, "answer": answer, "committed_calls": actor["committed_calls"]},
-        )
         if benchmark.id in TASK_BENCHMARKS:
             bridge_result.update(
                 finalize_task(
