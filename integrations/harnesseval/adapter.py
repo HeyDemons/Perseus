@@ -138,6 +138,7 @@ def run(request_path: Path) -> int:
         name = str(event.get("event", "unknown"))
         mechanism_counts[name] = mechanism_counts.get(name, 0) + 1
 
+    enabled = environment.get("PERSEUS_ENABLED", "1") == "1"
     actual = answer_path.read_text(encoding="utf-8") if answer_path.is_file() else ""
     exact = actual.strip() == expected
     tool_contract = tool_names.count("read") >= 2 and tool_names.count("write") >= 1
@@ -145,7 +146,19 @@ def run(request_path: Path) -> int:
         mechanism_counts.get("prediction_completed", 0) >= 1
         and mechanism_counts.get("candidate_prelaunched", 0) >= 1
     )
-    passed = completed.returncode == 0 and exact and tool_contract and speculative_path
+    actor_only_path = not any(
+        mechanism_counts.get(name, 0)
+        for name in (
+            "prediction_started",
+            "prediction_completed",
+            "candidate_prelaunched",
+            "cache_hit",
+            "cache_miss",
+        )
+    )
+    mechanism_contract = speculative_path if enabled else actor_only_path
+    task_success = completed.returncode == 0 and exact and tool_contract
+    passed = task_success and mechanism_contract
 
     harness_result = {
         "schema_version": 1,
@@ -153,6 +166,7 @@ def run(request_path: Path) -> int:
         "task_id": task.get("id"),
         "status": "completed" if passed else "failed",
         "execution_seconds": execution_seconds,
+        "perseus_enabled": enabled,
         "actor": {
             "provider": environment.get("PERSEUS_ACTOR_PROVIDER", "openai-compatible"),
             "model": environment.get("PERSEUS_ACTOR_MODEL", ""),
@@ -190,6 +204,9 @@ def run(request_path: Path) -> int:
             "exact_file": 1.0 if exact else 0.0,
             "tool_contract": 1.0 if tool_contract else 0.0,
             "speculative_path": 1.0 if speculative_path else 0.0,
+            "actor_only_path": 1.0 if actor_only_path else 0.0,
+            "mechanism_contract": 1.0 if mechanism_contract else 0.0,
+            "task_success": 1.0 if task_success else 0.0,
             "end_to_end": 1.0 if passed else 0.0,
         },
         "answer": actual,

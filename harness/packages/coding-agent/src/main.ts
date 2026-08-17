@@ -648,7 +648,9 @@ export async function main(args: string[], options?: MainOptions) {
 			const provider = process.env.PERSEUS_SPECULATOR_PROVIDER?.trim() || actorModel?.provider || "";
 			const modelId = process.env.PERSEUS_SPECULATOR_MODEL?.trim() || actorModel?.id || "";
 			const speculatorModel = provider && modelId ? modelRegistry.find(provider, modelId) : undefined;
-			const safeTools = (process.env.PERSEUS_SAFE_TOOLS || "read,grep,find,ls")
+			const safeTools = (process.env.PERSEUS_SAFE_TOOLS === undefined
+				? "read,grep,find,ls"
+				: process.env.PERSEUS_SAFE_TOOLS)
 				.split(",")
 				.map((name) => name.trim())
 				.filter(Boolean);
@@ -658,7 +660,10 @@ export async function main(args: string[], options?: MainOptions) {
 					message: `Speculative Actions model not found: ${provider}/${modelId}`,
 				});
 			} else if (safeTools.length === 0) {
-				diagnostics.push({ type: "error", message: "PERSEUS_SAFE_TOOLS must contain at least one exact tool name" });
+				diagnostics.push({
+					type: "warning",
+					message: "PERSEUS has no benchmark-declared safe tools; this task will run on the Actor-only path",
+				});
 			} else {
 				const configuredSpeculatorMaxTokens = Number.parseInt(
 					process.env.PERSEUS_SPECULATOR_MAX_TOKENS || "",

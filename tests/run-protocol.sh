@@ -10,4 +10,7 @@ RUNTIME="$(bash "${ROOT}/scripts/prepare-harness-runtime.sh")"
   ./node_modules/.bin/tsx \
     --tsconfig tsconfig.json \
     packages/agent/test/perseus-runtime.test.ts
+  ./node_modules/.bin/tsx \
+    --tsconfig tsconfig.json \
+    packages/coding-agent/test/perseus-recovery.test.ts
 )

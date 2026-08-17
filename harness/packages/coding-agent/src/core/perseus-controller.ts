@@ -31,6 +31,7 @@ class PerseusController implements SpeculativeActionsController {
 	private readonly timeoutMs?: number;
 	private readonly safeTools: Set<string>;
 	private readonly traceFile?: string;
+	private recoverActorWithoutSpeculation = false;
 
 	constructor(options: PerseusControllerOptions) {
 		this.options = options;
@@ -50,6 +51,15 @@ class PerseusController implements SpeculativeActionsController {
 
 	beginTurn(input: SpeculativeActionsBeginContext) {
 		const id = `${input.requestIndex}-${randomUUID()}`;
+		if (this.recoverActorWithoutSpeculation) {
+			this.record({
+				event: "prediction_suppressed",
+				requestIndex: input.requestIndex,
+				turnId: id,
+				reason: "actor_transport_recovery",
+			});
+			return { id, candidates: Promise.resolve([]) };
+		}
 		const abortController = new AbortController();
 		const abortFromParent = () => abortController.abort();
 		input.signal?.addEventListener("abort", abortFromParent, { once: true });
@@ -70,6 +80,9 @@ class PerseusController implements SpeculativeActionsController {
 	}
 
 	record(event: SpeculativeActionTraceEvent): void {
+		if (event.event === "actor_resolved") {
+			this.recoverActorWithoutSpeculation = event.stopReason === "error";
+		}
 		if (!this.traceFile) return;
 		try {
 			mkdirSync(dirname(this.traceFile), { recursive: true });
