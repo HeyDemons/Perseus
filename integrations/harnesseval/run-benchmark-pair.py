@@ -244,13 +244,13 @@ def preflight_tool_endpoint(
 
 def tool_bridge_failure(benchmark_id: str, bridge_result: dict[str, Any]) -> str | None:
     """Identify the silent bridge failure that previously became a normal zero score."""
-    if benchmark_id not in TASK_BENCHMARKS:
+    if benchmark_id not in NATIVE_EPISODE_BENCHMARKS | TASK_BENCHMARKS:
         return None
     tool_calls = bridge_result.get("tool_calls")
     environment_calls = bridge_result.get("environment_tool_calls")
     if isinstance(tool_calls, int) and tool_calls > 0 and environment_calls == 0:
         return (
-            f"Agent emitted {tool_calls} committed tool call(s), but the task environment "
+            f"Agent emitted {tool_calls} committed tool call(s), but the benchmark environment "
             "executed none"
         )
     return None
@@ -1167,17 +1167,12 @@ def run_mode(
             )
         )
         server_url = handle.url
-        # Product-server containers are reached directly on the bridge. Task-product
-        # servers are host processes and are reached through the rootful/rootless-aware
-        # alias above while remaining bound to host loopback.
-        direct_hosts = (
-            (handle.container_ip,) if handle.container_ip else ("host.docker.internal",)
-        )
-        product_endpoint = (
-            f"http://{handle.container_ip}:8765"
-            if handle.container_ip
-            else server_url.replace("127.0.0.1", "host.docker.internal")
-        )
+        # Always use the published host port through the rootful/rootless-aware alias.
+        # A rootless container IP can answer a short host probe yet still reset the long
+        # blocking POST used by the native episode rendezvous. The published route is the
+        # same one preflight verifies from the exact agent image before any model request.
+        direct_hosts = ("host.docker.internal",)
+        product_endpoint = container_reachable_url(server_url)
         events_path = mode_dir / "perseus-events.jsonl"
         stderr_path = mode_dir / "perseus-stderr.log"
         trace_path = mode_dir / "perseus-trace.jsonl"
@@ -1207,7 +1202,10 @@ def run_mode(
         )
         agent_timed_out = False
 
-        if handle.container_ip is None:
+        # Every product route must be proved from the exact agent image. Previously this
+        # was skipped whenever Docker inspect returned a container IP, which let every
+        # Tau2 tool call fail as `fetch failed` while the arm was recorded as a normal zero.
+        if product_endpoint:
             manifest = request_json(f"{server_url}/manifest")
             tools = [str(item["name"]) for item in manifest["tools"]]
             safe_tools = [str(item) for item in manifest.get("safe_tools", [])]

@@ -114,6 +114,12 @@ class HarnessEvalRunnerTests(unittest.TestCase):
         self.assertIn("http://host.docker.internal:12345", command)
         self.assertIn("returncode=0", log)
 
+    def test_loopback_product_endpoint_uses_host_alias(self) -> None:
+        self.assertEqual(
+            runner.container_reachable_url("http://127.0.0.1:32123"),
+            "http://host.docker.internal:32123",
+        )
+
     def test_missing_environment_calls_is_an_infrastructure_failure(self) -> None:
         message = runner.tool_bridge_failure(
             "terminal-bench-2",
@@ -126,10 +132,11 @@ class HarnessEvalRunnerTests(unittest.TestCase):
                 {"tool_calls": 9, "environment_tool_calls": 9},
             )
         )
-        self.assertIsNone(
+        self.assertIn(
+            "9 committed tool call",
             runner.tool_bridge_failure(
                 "tau2", {"tool_calls": 9, "environment_tool_calls": 0}
-            )
+            ) or "",
         )
 
     def test_bfcl_commits_only_the_first_assistant_tool_batch(self) -> None:
