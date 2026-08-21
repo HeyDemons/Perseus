@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { request as httpRequest } from "node:http";
 
 type ToolEntry = {
 	name: string;
@@ -25,6 +26,39 @@ type ToolContent =
 
 const WIRE_IMAGE_MARKER = "_harnesseval_image";
 const DECLARATION_ONLY_LIFECYCLE = "single_turn_declaration_only";
+
+export function postJsonDirect(url: string, payload: Record<string, unknown>): Promise<{ ok: boolean; payload: any }> {
+	const body = JSON.stringify(payload);
+	return new Promise((resolve, reject) => {
+		const request = httpRequest(
+			url,
+			{
+				method: "POST",
+				agent: false,
+				headers: {
+					"content-type": "application/json",
+					"content-length": Buffer.byteLength(body).toString(),
+				},
+			},
+			(response) => {
+				const chunks: Buffer[] = [];
+				response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+				response.on("error", reject);
+				response.on("end", () => {
+					try {
+						const decoded = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+						const status = response.statusCode ?? 500;
+						resolve({ ok: status >= 200 && status < 300, payload: decoded });
+					} catch (error) {
+						reject(error);
+					}
+				});
+			},
+		);
+		request.on("error", reject);
+		request.end(body);
+	});
+}
 
 function stripWireImages(value: unknown, images: ToolContent[]): unknown {
 	if (Array.isArray(value)) return value.map((item) => stripWireImages(item, images));
@@ -87,16 +121,12 @@ export default function harnessevalToolBridge(api: any) {
 	api.on("tool_result", async (event: any) => {
 		const speculation = (event.details as SpeculativeDetails | undefined)?.harnessevalSpeculation;
 		if (!speculation) return undefined;
-		const response = await fetch(`${endpoint}/commit`, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({
+		const response = await postJsonDirect(`${endpoint}/commit`, {
 				speculation_id: speculation.id,
 				tool: speculation.tool,
 				arguments: speculation.arguments,
-			}),
 		});
-		const payload = await response.json();
+		const payload = response.payload;
 		return {
 			content: toolResultContent(payload),
 			details: { harnessevalSpeculationCommitted: speculation.id },
@@ -112,16 +142,12 @@ export default function harnessevalToolBridge(api: any) {
 			async execute(toolCallId: string, params: Record<string, unknown>) {
 				if (declarationOnly) return declarationOnlyToolResult(entry.name, params ?? {});
 				try {
-					const response = await fetch(`${endpoint}/execute`, {
-						method: "POST",
-						headers: { "content-type": "application/json" },
-						body: JSON.stringify({
+					const response = await postJsonDirect(`${endpoint}/execute`, {
 							tool: entry.name,
 							arguments: params ?? {},
 							speculative: toolCallId.startsWith("spec-"),
-						}),
 					});
-					const payload = await response.json();
+					const payload = response.payload;
 					const speculationId = payload?._harnesseval_speculation_id;
 					const visiblePayload = { ...payload };
 					delete visiblePayload._harnesseval_speculation_id;

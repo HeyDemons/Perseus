@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import harnessevalToolBridge, { toolResultContent } from "./tool_bridge_extension.ts";
+import harnessevalToolBridge, { postJsonDirect, toolResultContent } from "./tool_bridge_extension.ts";
 
 const content = toolResultContent({
 	ok: true,
@@ -29,6 +30,35 @@ assert.deepEqual(JSON.parse(content[0].text), {
 });
 assert.equal(content[0].text.includes("iVBORw0K"), false);
 assert.equal(content[0].text.includes("_harnesseval_image"), false);
+
+async function testDirectPostBypassesProxyEnvironment() {
+	const server = createServer((request, response) => {
+		const chunks: Buffer[] = [];
+		request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+		request.on("end", () => {
+			assert.equal(request.method, "POST");
+			assert.deepEqual(JSON.parse(Buffer.concat(chunks).toString("utf8")), { value: 7 });
+			response.writeHead(200, { "content-type": "application/json" });
+			response.end(JSON.stringify({ ok: true, result: "direct" }));
+		});
+	});
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const address = server.address();
+	if (address === null || typeof address === "string") throw new Error("missing test server port");
+	const previousProxy = process.env.HTTP_PROXY;
+	try {
+		process.env.HTTP_PROXY = "http://127.0.0.1:1";
+		const result = await postJsonDirect(`http://127.0.0.1:${address.port}/execute`, { value: 7 });
+		assert.equal(result.ok, true);
+		assert.deepEqual(result.payload, { ok: true, result: "direct" });
+	} finally {
+		if (previousProxy === undefined) delete process.env.HTTP_PROXY;
+		else process.env.HTTP_PROXY = previousProxy;
+		await new Promise<void>((resolve, reject) =>
+			server.close((error) => (error ? reject(error) : resolve())),
+		);
+	}
+}
 
 async function testDeclarationOnlyLifecycle() {
 	const directory = mkdtempSync(join(tmpdir(), "harnesseval-declaration-only-"));
@@ -84,7 +114,7 @@ async function testDeclarationOnlyLifecycle() {
 	}
 }
 
-testDeclarationOnlyLifecycle()
+Promise.all([testDirectPostBypassesProxyEnvironment(), testDeclarationOnlyLifecycle()])
 	.then(() => console.log("HarnessEval tool bridge: OK"))
 	.catch((error) => {
 		console.error(error);
