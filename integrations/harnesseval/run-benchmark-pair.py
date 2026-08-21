@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -15,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 
 STATIC_BENCHMARKS = {"gaia", "gdpval", "trajectory-bench", "bfcl"}
@@ -43,6 +45,18 @@ API_ENV = (
     "PERSEUS_API_MAX_RETRY_DELAY_MS",
     "PERSEUS_CONTEXT_WINDOW",
 )
+ROOTLESS_HOST_GATEWAY = "10.0.2.2"
+HOST_GATEWAY_OVERRIDE_ENV = "HARNESSEVAL_DOCKER_HOST_GATEWAY"
+DECLARATION_ONLY_LIFECYCLE = "single_turn_declaration_only"
+
+
+def product_working_directory(benchmark_id: str) -> str:
+    if benchmark_id in STATIC_BENCHMARKS:
+        # The product container mounts mode_dir at /job; the static bridge copied the
+        # prepared case into this shared subtree. Starting here keeps relative paths inside
+        # the case instead of teaching the model that its workspace is the unrelated /tmp.
+        return "/job/benchmark_server/case_workspace/workspace"
+    return "/tmp"
 
 
 @dataclass
@@ -52,6 +66,164 @@ class ToolServerHandle:
     url: str
     task_container: str | None = None
     context: dict[str, Any] | None = None
+    container_ip: str | None = None
+
+
+# The benchmark tool server is always reached over loopback. An operator shell that
+# exports http_proxy for image builds must not have that proxy swallow this control
+# channel, so these requests are issued with proxy handling explicitly disabled.
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def container_reachable_url(url: str) -> str:
+    parsed = urlsplit(url)
+    if parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+        return url
+    port = f":{parsed.port}" if parsed.port is not None else ""
+    return urlunsplit((parsed.scheme, f"host.docker.internal{port}", parsed.path, parsed.query, parsed.fragment))
+
+
+def docker_host_alias(platform: Any) -> str:
+    """Return a host alias that works for both rootful and rootless Docker.
+
+    Docker's ``host-gateway`` special value resolves to the bridge gateway. That is the
+    host under rootful Docker, but under RootlessKit it resolves to the rootless daemon's
+    inner bridge (172.17.0.1 on the experiment server), where no host process is listening.
+    RootlessKit exposes the real host loopback through 10.0.2.2 when host-loopback access is
+    enabled. A preflight below verifies that the daemon actually permits this before any
+    model request is made.
+    """
+    override = os.environ.get(HOST_GATEWAY_OVERRIDE_ENV, "").strip()
+    if override:
+        if any(character.isspace() for character in override):
+            raise RuntimeError(
+                f"{HOST_GATEWAY_OVERRIDE_ENV} must be one Docker --add-host address"
+            )
+        return f"host.docker.internal:{override}"
+
+    completed = subprocess.run(
+        platform._docker("info", "--format", "{{json .SecurityOptions}}"),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise RuntimeError(f"Unable to inspect Docker security options: {detail}")
+    try:
+        security_options = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"Docker returned invalid security options: {completed.stdout.strip()}"
+        ) from exc
+    if not isinstance(security_options, list):
+        raise RuntimeError("Docker security options were not a JSON list")
+    rootless = any("rootless" in str(option).lower() for option in security_options)
+    gateway = ROOTLESS_HOST_GATEWAY if rootless else "host-gateway"
+    return f"host.docker.internal:{gateway}"
+
+
+class ToolBridgeInfrastructureError(RuntimeError):
+    pass
+
+
+_TOOL_ENDPOINT_PROBE = r"""
+const endpoint = process.argv[1].replace(/\/$/, "") + "/manifest";
+const controller = new AbortController();
+const timer = setTimeout(() => controller.abort(), 10000);
+fetch(endpoint, {signal: controller.signal})
+  .then(async response => {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const body = await response.json();
+    if (!Array.isArray(body.tools)) throw new Error("manifest has no tools array");
+    console.log(`ok tools=${body.tools.length}`);
+  })
+  .catch(error => {
+    console.error(error.cause?.code || error.name || error.message);
+    process.exitCode = 1;
+  })
+  .finally(() => clearTimeout(timer));
+"""
+
+
+def preflight_tool_endpoint(
+    *,
+    platform: Any,
+    image: str,
+    endpoint: str,
+    host_alias: str,
+    direct_hosts: tuple[str, ...],
+    log_path: Path,
+) -> None:
+    """Prove that the exact agent image can reach the tool bridge before spending tokens."""
+    container = f"harnesseval-preflight-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+    command = platform._docker(
+        "run",
+        "--rm",
+        "--init",
+        "--name",
+        container,
+        "--network",
+        "bridge",
+        "--add-host",
+        host_alias,
+        "--read-only",
+        "--tmpfs",
+        "/tmp:rw,exec,nosuid,size=64m",
+    )
+    command.extend(egress_flags(platform, "bridge", direct_hosts))
+    command.extend(
+        ["--entrypoint", "node", image, "-e", _TOOL_ENDPOINT_PROBE, endpoint]
+    )
+    try:
+        completed = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        subprocess.run(
+            platform._docker("rm", "-f", container),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        log_path.write_text(
+            f"timeout after 30s\nstdout:\n{exc.stdout or ''}\nstderr:\n{exc.stderr or ''}\n",
+            encoding="utf-8",
+        )
+        raise ToolBridgeInfrastructureError(
+            f"Agent-container tool endpoint preflight timed out: {endpoint}"
+        ) from exc
+
+    log_path.write_text(
+        f"returncode={completed.returncode}\nstdout:\n{completed.stdout}"
+        f"\nstderr:\n{completed.stderr}\n",
+        encoding="utf-8",
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise ToolBridgeInfrastructureError(
+            "Agent container cannot reach the benchmark tool endpoint "
+            f"{endpoint} via {host_alias}: {detail or 'probe failed'}"
+        )
+
+
+def tool_bridge_failure(benchmark_id: str, bridge_result: dict[str, Any]) -> str | None:
+    """Identify the silent bridge failure that previously became a normal zero score."""
+    if benchmark_id not in TASK_BENCHMARKS:
+        return None
+    tool_calls = bridge_result.get("tool_calls")
+    environment_calls = bridge_result.get("environment_tool_calls")
+    if isinstance(tool_calls, int) and tool_calls > 0 and environment_calls == 0:
+        return (
+            f"Agent emitted {tool_calls} committed tool call(s), but the task environment "
+            "executed none"
+        )
+    return None
 
 
 def atomic_json(path: Path, value: Any) -> None:
@@ -75,7 +247,7 @@ def request_json(
         method="GET" if payload is None else "POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _DIRECT_OPENER.open(request, timeout=timeout) as response:
             value = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
@@ -123,9 +295,19 @@ def jsonl(path: Path) -> tuple[list[dict[str, Any]], int]:
     return rows, malformed
 
 
-def record_json_stream(command: list[str], events_path: Path, stderr_path: Path) -> int:
+def record_json_stream(
+    command: list[str],
+    events_path: Path,
+    stderr_path: Path,
+    *,
+    timeout_sec: float | None = None,
+    container_name: str | None = None,
+) -> int:
     """Record Pi events without duplicating every accumulated stream prefix."""
-    with events_path.open("w", encoding="utf-8") as events, stderr_path.open("w", encoding="utf-8") as stderr:
+    with (
+        events_path.open("w", encoding="utf-8") as events,
+        stderr_path.open("w", encoding="utf-8") as stderr,
+    ):
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -134,23 +316,73 @@ def record_json_stream(command: list[str], events_path: Path, stderr_path: Path)
             bufsize=1,
         )
         assert process.stdout is not None
-        for line in process.stdout:
+
+        def consume_line(line: str) -> None:
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 events.write(line)
-                continue
+                events.flush()
+                return
             if isinstance(event, dict) and event.get("type") == "message_update":
                 update = event.get("assistantMessageEvent")
                 if isinstance(update, dict):
                     event = {
                         "type": "message_update",
                         "assistantMessageEvent": {
-                            key: value for key, value in update.items() if key != "partial"
+                            key: value
+                            for key, value in update.items()
+                            if key != "partial"
                         },
                     }
-            events.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
-        return process.wait()
+            events.write(
+                json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+            )
+            events.flush()
+
+        if timeout_sec is None:
+            # Preserve the established streaming path for non-Terminal benchmarks. Only a
+            # task with an official phase deadline needs the waiter thread below.
+            for line in process.stdout:
+                consume_line(line)
+            return process.wait()
+
+        def consume() -> None:
+            assert process.stdout is not None
+            for line in process.stdout:
+                consume_line(line)
+
+        reader = threading.Thread(
+            target=consume, name="perseus-json-reader", daemon=True
+        )
+        reader.start()
+        try:
+            returncode = process.wait(timeout=timeout_sec)
+        except subprocess.TimeoutExpired:
+            if container_name:
+                try:
+                    subprocess.run(
+                        ["docker", "kill", container_name],
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        timeout=15,
+                    )
+                except subprocess.TimeoutExpired:
+                    pass
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            stderr.write(f"\nAgent phase timed out after {timeout_sec:.1f}s\n")
+            stderr.flush()
+            returncode = 124
+        finally:
+            reader.join(timeout=10)
+        return returncode
 
 
 def assistant_text(events: list[dict[str, Any]]) -> str:
@@ -232,6 +464,35 @@ def actor_metrics(events: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def first_assistant_tool_calls(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return exactly the native tool-call batch BFCL evaluates.
+
+    Official single-turn BFCL performs one provider request and scores that assistant
+    response directly. Keep this extraction independent of the extension's termination
+    hint so a future agent-loop regression cannot silently accumulate retry calls again.
+    """
+    for event in events:
+        if event.get("type") != "message_end":
+            continue
+        message = event.get("message")
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        return [
+            {
+                "id": str(item.get("id") or ""),
+                "name": str(item.get("name") or ""),
+                "arguments": (
+                    item.get("arguments")
+                    if isinstance(item.get("arguments"), dict)
+                    else {}
+                ),
+            }
+            for item in message.get("content") or []
+            if isinstance(item, dict) and item.get("type") == "toolCall"
+        ]
+    return []
+
+
 def mechanism_counts(trace: list[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for row in trace:
@@ -242,6 +503,14 @@ def mechanism_counts(trace: list[dict[str, Any]]) -> dict[str, int]:
 
 def score_result(benchmark_id: str, prepared: Path | None, result: dict[str, Any]) -> dict[str, Any]:
     if benchmark_id in NATIVE_EPISODE_BENCHMARKS | TASK_BENCHMARKS:
+        if result.get("failure_kind") == "tool_bridge_infrastructure":
+            return {
+                "authority": f"{benchmark_id}_native_evaluator",
+                "status": "infra_failed",
+                "score": None,
+                "reward": None,
+                "termination_reason": "tool_bridge_infrastructure",
+            }
         bridge = result.get("native") or {}
         return {
             "authority": f"{benchmark_id}_native_evaluator",
@@ -315,11 +584,67 @@ def docker_host_port(container_name: str, port: int, process: subprocess.Popen[s
     raise RuntimeError("Benchmark tool server exited before Docker published its port")
 
 
-def egress_flags(platform: Any, network: str) -> list[str]:
-    return list(platform._egress_env(network))
+def egress_flags(platform: Any, network: str, direct_hosts: tuple[str, ...] = ()) -> list[str]:
+    """Docker may inject a client-wide proxy into every container. Any host the product
+    must reach directly has to be named in NO_PROXY, and proxy bypass lists match host
+    names, not CIDR ranges, so the concrete address is appended rather than a subnet."""
+    flags = list(platform._egress_env(network))
+    if not direct_hosts:
+        return flags
+    extra = ",".join(direct_hosts)
+    return [
+        f"{item},{extra}" if item.startswith(("NO_PROXY=", "no_proxy=")) else item
+        for item in flags
+    ]
+
+
+def container_address(platform: Any, container_name: str) -> str | None:
+    completed = subprocess.run(
+        platform._docker(
+            "inspect", "-f",
+            "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+            container_name,
+        ),
+        text=True, capture_output=True, check=False,
+    )
+    return completed.stdout.strip() or None
+
+
+# Rootless Docker picks the published host port and RootlessKit binds it a moment later, so
+# two concurrent launches can be handed the same one: "RootlessKit PortManager.AddPort():
+# listen tcp4 127.0.0.1:32936: bind: address already in use", which killed 2 of 30 tau2 cases
+# before the model ran at all. The race cannot be designed away from here -- picking the port
+# ourselves loses the same way -- so relaunch on that exact signature with a fresh name.
+PORT_BIND_RACE = "bind: address already in use"
+PORT_BIND_ATTEMPTS = 3
 
 
 def start_tool_server(
+    *, platform: Any, benchmark: Any, prepared: Path | None, mode_dir: Path, case_id: str
+) -> ToolServerHandle:
+    for attempt in range(PORT_BIND_ATTEMPTS):
+        try:
+            return _start_tool_server(
+                platform=platform,
+                benchmark=benchmark,
+                prepared=prepared,
+                mode_dir=mode_dir,
+                case_id=case_id,
+            )
+        except RuntimeError:
+            # Each attempt truncates the log, so this reads the attempt that just failed. Any
+            # other RuntimeError -- a server that came up but never published its manifest --
+            # is not a race and must surface unchanged.
+            log_path = mode_dir / "benchmark_server" / "server.log"
+            raced = log_path.exists() and PORT_BIND_RACE in log_path.read_text(
+                encoding="utf-8", errors="replace"
+            )
+            if attempt + 1 >= PORT_BIND_ATTEMPTS or not raced:
+                raise
+    raise AssertionError("unreachable")
+
+
+def _start_tool_server(
     *, platform: Any, benchmark: Any, prepared: Path | None, mode_dir: Path, case_id: str
 ) -> ToolServerHandle:
     server_dir = mode_dir / "benchmark_server"
@@ -336,11 +661,14 @@ def start_tool_server(
         "-v", f"{server_dir}:/job:rw",
         "-w", "/opt/harnesseval",
     ]
+    container_api_url = container_reachable_url(os.environ.get("API_URL", ""))
+    if container_api_url.startswith(("http://host.docker.internal", "https://host.docker.internal")):
+        command.extend(["--add-host", docker_host_alias(platform)])
     if prepared is not None:
         command.extend(["-v", f"{prepared / 'input'}:/bridge:ro"])
     for name in ("API_URL", "TOOLBENCH_KEY", "TRAJECT_TOOL_MODE"):
         if name in os.environ:
-            command.extend(["-e", name])
+            command.extend(["-e", f"API_URL={container_api_url}" if name == "API_URL" else name])
     if benchmark.id in NATIVE_EPISODE_BENCHMARKS:
         module = (
             "benchmark_platform.bridges.vita_product_server"
@@ -382,7 +710,9 @@ def start_tool_server(
         raise
     url = f"http://127.0.0.1:{port}"
     wait_manifest(url, process, log_path)
-    return ToolServerHandle(process, log, url)
+    return ToolServerHandle(
+        process, log, url, container_ip=container_address(platform, container_name)
+    )
 
 
 def swe_controller_command(
@@ -396,16 +726,22 @@ def swe_controller_command(
         command.extend(["-e", "HF_TOKEN"])
     command.extend(
         [
-            "-v", f"{job.resolve()}:/job:rw",
+            "-v",
+            f"{job.resolve()}:/job:rw",
             benchmark.adapter["image"],
-            "python", "/opt/platform/swebench_bridge.py", action,
-            "--case", case_id,
+            "python",
+            "/opt/platform/swebench_bridge.py",
+            action,
+            "--case",
+            case_id,
         ]
     )
     return command
 
 
-def _record_command(command: list[str], log_path: Path) -> subprocess.CompletedProcess[str]:
+def _record_command(
+    command: list[str], log_path: Path
+) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(command, text=True, capture_output=True, check=False)
     with log_path.open("a", encoding="utf-8") as log:
         log.write(completed.stdout)
@@ -422,43 +758,67 @@ def start_task_tool_server(
     container = f"harnesseval-task-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     context: dict[str, Any] = {"server_dir": server_dir}
     if benchmark.id == "terminal-bench-2":
-        task_dir = Path(benchmark.adapter["task_dir"])
-        prompt = (task_dir / "instruction.md").read_text(encoding="utf-8")
-        workspace_root = "/app"
-        create = platform._docker("create", "--init", "--name", container)
-        create.extend(["--label", "orch.benchmark-platform=1", "--label", "orch.product-bridge=1"])
-        if docker_platform := benchmark.adapter.get("platform"):
-            create.extend(["--platform", docker_platform])
-        network = "bridge" if benchmark.adapter.get("allow_internet") else "none"
-        create.extend(["--network", network, *egress_flags(platform, network)])
-        create.extend(
-            [
-                "-w", workspace_root,
-                benchmark.adapter["image"],
-                "sh", "-lc", "while :; do sleep 3600; done",
-            ]
+        task_dir, task_metadata = platform._terminal_metadata(benchmark, case_id)
+        settings = platform._terminal_task_settings(task_metadata)
+        if settings.verifier_mode != "shared":
+            raise RuntimeError(
+                "Terminal-Bench product runner supports Harbor shared verifiers only"
+            )
+        prompt = platform._terminal_agent_prompt(
+            (task_dir / "instruction.md").read_text(encoding="utf-8")
         )
-        context.update({"task_dir": task_dir, "workspace_root": workspace_root})
+        # Terminal-Bench tasks are machine-state tasks, not /app-only file tasks. Nginx,
+        # apt/R installs and service configuration all live elsewhere in the same container.
+        workspace_root = "/"
+        task_image = (
+            task_metadata.get("environment", {}).get("docker_image")
+            or benchmark.adapter["image"]
+        )
+        create = platform._terminal_create_command(
+            benchmark=benchmark,
+            metadata=task_metadata,
+            image=task_image,
+            container=container,
+            labels=["orch.benchmark-platform=1", "orch.product-bridge=1"],
+        )
+        context.update(
+            {
+                "task_dir": task_dir,
+                "task_metadata": task_metadata,
+                "settings": settings,
+                "workspace_root": workspace_root,
+                "task_image": task_image,
+            }
+        )
     else:
-        prepare = swe_controller_command(platform, benchmark, server_dir, "prepare", case_id)
+        prepare = swe_controller_command(
+            platform, benchmark, server_dir, "prepare", case_id
+        )
         completed = _record_command(prepare, setup_log)
         public_path = server_dir / "public_case.json"
         if completed.returncode != 0 or not public_path.is_file():
-            raise RuntimeError("SWE-bench public case preparation failed; see setup.log")
+            raise RuntimeError(
+                "SWE-bench public case preparation failed; see setup.log"
+            )
         public_case = json.loads(public_path.read_text(encoding="utf-8"))
         if public_case.get("hidden_fields_exposed_to_agent") != []:
             raise RuntimeError("SWE-bench preparation exposed hidden authority fields")
         prompt = str(public_case["prompt"])
         workspace_root = str(public_case["workspace_root"])
         create = platform._docker("create", "--init", "--name", container)
-        create.extend(["--label", "orch.benchmark-platform=1", "--label", "orch.product-bridge=1"])
+        create.extend(
+            ["--label", "orch.benchmark-platform=1", "--label", "orch.product-bridge=1"]
+        )
         create.extend(["--platform", public_case["task_image"]["platform"]])
         create.extend(["--network", "bridge", *egress_flags(platform, "bridge")])
         create.extend(
             [
-                "-w", workspace_root,
+                "-w",
+                workspace_root,
                 public_case["task_image"]["name"],
-                "sh", "-lc", "while :; do sleep 3600; done",
+                "sh",
+                "-lc",
+                "while :; do sleep 3600; done",
             ]
         )
         context.update({"public_case": public_case, "workspace_root": workspace_root})
@@ -467,8 +827,17 @@ def start_task_tool_server(
         raise RuntimeError("Task container creation failed; see setup.log")
     started = _record_command(platform._docker("start", container), setup_log)
     if started.returncode != 0:
-        subprocess.run(platform._docker("rm", "-f", container), capture_output=True, check=False)
+        subprocess.run(
+            platform._docker("rm", "-f", container), capture_output=True, check=False
+        )
         raise RuntimeError("Task container start failed; see setup.log")
+    if benchmark.id == "terminal-bench-2":
+        default_workdir = platform._terminal_container_workdir(container)
+        context["default_workdir"] = default_workdir
+        agent_timeout_sec = float(context["settings"].agent_timeout_sec)
+    else:
+        default_workdir = workspace_root
+        agent_timeout_sec = 3600.0
     prompt_path = server_dir / "prompt.txt"
     prompt_path.write_text(prompt, encoding="utf-8")
     endpoint_path = server_dir / "task_product_server.json"
@@ -476,16 +845,29 @@ def start_task_tool_server(
     log = log_path.open("w", encoding="utf-8")
     environment = dict(os.environ)
     python_path = environment.get("PYTHONPATH")
-    environment["PYTHONPATH"] = str(platform.root) + (os.pathsep + python_path if python_path else "")
+    environment["PYTHONPATH"] = str(platform.root) + (
+        os.pathsep + python_path if python_path else ""
+    )
     command = [
         sys.executable,
-        "-m", "benchmark_platform.bridges.task_product_server",
-        "--benchmark", benchmark.id,
-        "--case", case_id,
-        "--prompt-file", str(prompt_path),
-        "--container", container,
-        "--workspace-root", workspace_root,
-        "--job", str(server_dir),
+        "-m",
+        "benchmark_platform.bridges.task_product_server",
+        "--benchmark",
+        benchmark.id,
+        "--case",
+        case_id,
+        "--prompt-file",
+        str(prompt_path),
+        "--container",
+        container,
+        "--workspace-root",
+        workspace_root,
+        "--default-workdir",
+        default_workdir,
+        "--agent-timeout-sec",
+        str(agent_timeout_sec),
+        "--job",
+        str(server_dir),
     ]
     process = subprocess.Popen(
         command,
@@ -499,7 +881,9 @@ def start_task_tool_server(
         while process.poll() is None and not endpoint_path.is_file():
             time.sleep(0.1)
         if not endpoint_path.is_file():
-            raise RuntimeError("Task product server exited before publishing its endpoint")
+            raise RuntimeError(
+                "Task product server exited before publishing its endpoint"
+            )
         endpoint = json.loads(endpoint_path.read_text(encoding="utf-8"))
         url = f"http://{endpoint['host']}:{endpoint['port']}"
         wait_manifest(url, process, log_path)
@@ -509,76 +893,109 @@ def start_task_tool_server(
             process.terminate()
             process.wait()
         log.close()
-        subprocess.run(platform._docker("rm", "-f", container), capture_output=True, check=False)
+        subprocess.run(
+            platform._docker("rm", "-f", container), capture_output=True, check=False
+        )
         raise
 
 
 def finalize_task(
-    *, platform: Any, benchmark: Any, case_id: str, mode_dir: Path, handle: ToolServerHandle
+    *,
+    platform: Any,
+    benchmark: Any,
+    case_id: str,
+    mode_dir: Path,
+    handle: ToolServerHandle,
 ) -> dict[str, Any]:
     assert handle.task_container is not None
     context = handle.context or {}
     server_dir = Path(context["server_dir"])
     evaluator_log = server_dir / "evaluator.log"
     if benchmark.id == "terminal-bench-2":
-        workspace = mode_dir / "workspace"
-        workspace.mkdir()
-        copied = _record_command(
-            platform._docker("cp", f"{handle.task_container}:/app/.", str(workspace)),
-            evaluator_log,
-        )
-        if copied.returncode != 0:
-            raise RuntimeError("Unable to copy Terminal-Bench workspace")
         logs = mode_dir / "verifier"
         logs.mkdir()
         task_dir = Path(context["task_dir"])
-        verifier = f"{handle.task_container}-verifier"
-        verify = platform._docker("run", "--rm", "--init", "--name", verifier)
-        if docker_platform := benchmark.adapter.get("platform"):
-            verify.extend(["--platform", docker_platform])
-        verify.extend(egress_flags(platform, "bridge"))
-        verify.extend(
-            [
-                "--network", "bridge",
-                "-v", f"{workspace.resolve()}:/app:rw",
-                "-v", f"{task_dir / 'tests'}:/tests:ro",
-                "-v", f"{logs.resolve()}:/logs/verifier:rw",
-                "-w", "/app",
-                benchmark.adapter["image"],
-                "bash", "/tests/test.sh",
-            ]
+        task_metadata = dict(context["task_metadata"])
+        settings = context["settings"]
+        with evaluator_log.open("a", encoding="utf-8") as log:
+            verifier_result = platform._terminal_run_shared_verifier(
+                container=handle.task_container,
+                task_dir=task_dir,
+                logs_dir=logs,
+                timeout_sec=float(settings.verifier_timeout_sec),
+                log=log,
+                prefix="[terminal-bench-2:verifier] ",
+                verifier_env={
+                    str(name): str(value)
+                    for name, value in (
+                        task_metadata.get("verifier", {}).get("env") or {}
+                    ).items()
+                },
+                verifier_user=task_metadata.get("verifier", {}).get("user"),
+            )
+        workspace = mode_dir / "workspace"
+        copied = platform._terminal_copy_workdir(
+            container=handle.task_container,
+            workdir=str(context["default_workdir"]),
+            destination=workspace,
         )
-        checked = _record_command(verify, evaluator_log)
-        reward_path = logs / "reward.txt"
-        reward = reward_path.read_text(encoding="utf-8").strip() if reward_path.is_file() else None
+        if copied.returncode != 0:
+            with evaluator_log.open("a", encoding="utf-8") as log:
+                log.write(
+                    f"Unable to copy Terminal-Bench workdir artifact: "
+                    f"{copied.stderr or copied.stdout}\n"
+                )
+        scores = verifier_result.get("scores") or {}
+        reward = scores.get("reward")
         return {
-            "native_score_status": "completed" if reward is not None else "failed",
-            "native_score": float(reward) if reward is not None else None,
-            "native_reward": float(reward) if reward is not None else None,
-            "evaluator_returncode": checked.returncode,
-            "termination_reason": "official_verifier",
+            "native_score_status": verifier_result["status"],
+            "native_score": float(reward) if isinstance(reward, (int, float)) else None,
+            "native_reward": float(reward)
+            if isinstance(reward, (int, float))
+            else None,
+            "native_scores": scores,
+            "evaluator_returncode": verifier_result["returncode"],
+            "verifier_attempts": verifier_result["attempts"],
+            "verifier_error": verifier_result.get("error"),
+            "termination_reason": verifier_result["termination_reason"],
         }
     workspace_root = str(context["workspace_root"])
     staged = _record_command(
-        platform._docker("exec", "-w", workspace_root, handle.task_container, "git", "add", "-A"),
+        platform._docker(
+            "exec", "-w", workspace_root, handle.task_container, "git", "add", "-A"
+        ),
         evaluator_log,
     )
     if staged.returncode != 0:
         raise RuntimeError("Unable to stage SWE-bench workspace changes")
     patch_result = _record_command(
         platform._docker(
-            "exec", "-w", workspace_root, handle.task_container,
-            "git", "-c", "core.fileMode=false", "diff", "--cached", "--binary",
+            "exec",
+            "-w",
+            workspace_root,
+            handle.task_container,
+            "git",
+            "-c",
+            "core.fileMode=false",
+            "diff",
+            "--cached",
+            "--binary",
         ),
         evaluator_log,
     )
     if patch_result.returncode != 0:
         raise RuntimeError("Unable to extract SWE-bench model patch")
     (server_dir / "model.patch").write_text(patch_result.stdout, encoding="utf-8")
-    evaluate = swe_controller_command(platform, benchmark, server_dir, "evaluate", case_id)
+    evaluate = swe_controller_command(
+        platform, benchmark, server_dir, "evaluate", case_id
+    )
     checked = _record_command(evaluate, evaluator_log)
     payload_path = server_dir / "payload.json"
-    payload = json.loads(payload_path.read_text(encoding="utf-8")) if payload_path.is_file() else {}
+    payload = (
+        json.loads(payload_path.read_text(encoding="utf-8"))
+        if payload_path.is_file()
+        else {}
+    )
     resolved = payload.get("scores", {}).get("resolved")
     return {
         "native_score_status": payload.get("native_score_status", "failed"),
@@ -602,7 +1019,9 @@ def run_mode(
     enabled: bool,
 ) -> dict[str, Any]:
     mode = "perseus" if enabled else "actor-only"
-    mode_dir = run_dir / benchmark.id / case_id.replace("/", "_").replace(":", "_") / mode
+    mode_dir = (
+        run_dir / benchmark.id / case_id.replace("/", "_").replace(":", "_") / mode
+    )
     if mode_dir.exists():
         shutil.rmtree(mode_dir)
     mode_dir.mkdir(parents=True)
@@ -612,8 +1031,11 @@ def run_mode(
         / "harness/packages/coding-agent/src/core/system-prompt.ts"
     )
     if not system_prompt_source.is_file():
-        raise FileNotFoundError(f"PERSEUS system prompt source not found: {system_prompt_source}")
+        raise FileNotFoundError(
+            f"PERSEUS system prompt source not found: {system_prompt_source}"
+        )
     try:
+        host_alias = docker_host_alias(platform)
         handle = (
             start_task_tool_server(
                 platform=platform,
@@ -631,7 +1053,17 @@ def run_mode(
             )
         )
         server_url = handle.url
-        product_endpoint = server_url.replace("127.0.0.1", "host.docker.internal")
+        # Product-server containers are reached directly on the bridge. Task-product
+        # servers are host processes and are reached through the rootful/rootless-aware
+        # alias above while remaining bound to host loopback.
+        direct_hosts = (
+            (handle.container_ip,) if handle.container_ip else ("host.docker.internal",)
+        )
+        product_endpoint = (
+            f"http://{handle.container_ip}:8765"
+            if handle.container_ip
+            else server_url.replace("127.0.0.1", "host.docker.internal")
+        )
         events_path = mode_dir / "perseus-events.jsonl"
         stderr_path = mode_dir / "perseus-stderr.log"
         trace_path = mode_dir / "perseus-trace.jsonl"
@@ -641,9 +1073,100 @@ def run_mode(
         returncodes: list[int] = []
         agent_seconds = 0.0
         bridge_result: dict[str, Any] | None = None
+        lifecycle = ""
         tools: list[str] = []
         safe_tools: list[str] = []
         turn = 0
+        agent_timeout_sec = (
+            float((handle.context or {})["settings"].agent_timeout_sec)
+            if benchmark.id == "terminal-bench-2"
+            else None
+        )
+        agent_deadline = (
+            time.monotonic() + agent_timeout_sec
+            if agent_timeout_sec is not None
+            else None
+        )
+        agent_timed_out = False
+
+        if handle.container_ip is None:
+            manifest = request_json(f"{server_url}/manifest")
+            tools = [str(item["name"]) for item in manifest["tools"]]
+            safe_tools = [str(item) for item in manifest.get("safe_tools", [])]
+            lifecycle = str((manifest.get("metadata") or {}).get("lifecycle") or "")
+            preflight_log = mode_dir / "benchmark_server" / "connectivity_preflight.log"
+            try:
+                preflight_tool_endpoint(
+                    platform=platform,
+                    image=image,
+                    endpoint=product_endpoint,
+                    host_alias=host_alias,
+                    direct_hosts=direct_hosts,
+                    log_path=preflight_log,
+                )
+            except ToolBridgeInfrastructureError as exc:
+                events_path.write_text("", encoding="utf-8")
+                stderr_path.write_text(str(exc) + "\n", encoding="utf-8")
+                trace_path.write_text("", encoding="utf-8")
+                result = {
+                    "schema_version": 1,
+                    "status": "failed",
+                    "failure_kind": "tool_bridge_infrastructure",
+                    "error": str(exc),
+                    "benchmark": benchmark.id,
+                    "case_id": case_id,
+                    "profile": mode,
+                    "perseus_enabled": enabled,
+                    "agent_execution_seconds": 0.0,
+                    "returncode": 1,
+                    "answer": "",
+                    "scorer_answer": "",
+                    "answer_produced": False,
+                    "runtime_warning": None,
+                    "actor": {
+                        "rounds": 0,
+                        "committed_calls": [],
+                        "usage": {
+                            "input": 0,
+                            "output": 0,
+                            "cache_read": 0,
+                            "cache_write": 0,
+                            "total": 0,
+                        },
+                        "last_stop_reason": None,
+                        "last_error": str(exc),
+                    },
+                    "tools": {
+                        "available": tools,
+                        "safe_for_prelaunch": safe_tools,
+                        "calls": 0,
+                        "trajectory": [],
+                        "environment_calls": 0,
+                        "environment_trajectory": [],
+                    },
+                    "native": None,
+                    "speculation": {},
+                    "parse_health": {
+                        "event_rows": 0,
+                        "malformed_event_rows": 0,
+                        "trace_rows": 0,
+                        "malformed_trace_rows": 0,
+                    },
+                    "environment_names": sorted(
+                        name for name in API_ENV if name in os.environ
+                    ),
+                    "artifacts": {
+                        "events": str(events_path),
+                        "stderr": str(stderr_path),
+                        "trace": str(trace_path),
+                        "tool_trace": str(
+                            mode_dir / "benchmark_server" / "tool_trace.jsonl"
+                        ),
+                        "connectivity_preflight": str(preflight_log),
+                    },
+                }
+                atomic_json(mode_dir / "result.json", result)
+                return result
 
         while bridge_result is None:
             turn += 1
@@ -653,25 +1176,53 @@ def run_mode(
             atomic_json(mode_dir / f"tool_manifest-turn-{turn:03d}.json", manifest)
             tools = [str(item["name"]) for item in manifest["tools"]]
             safe_tools = [str(item) for item in manifest.get("safe_tools", [])]
-            task_system_time = str((manifest.get("metadata") or {}).get("system_time") or "").strip()
+            lifecycle = str((manifest.get("metadata") or {}).get("lifecycle") or "")
+            task_system_time = str(
+                (manifest.get("metadata") or {}).get("system_time") or ""
+            ).strip()
             turn_events = mode_dir / f"perseus-events-turn-{turn:03d}.jsonl"
             turn_stderr = mode_dir / f"perseus-stderr-turn-{turn:03d}.log"
             turn_trace = mode_dir / f"perseus-trace-turn-{turn:03d}.jsonl"
             turn_event_paths.append(turn_events)
             turn_stderr_paths.append(turn_stderr)
             turn_trace_paths.append(turn_trace)
+            turn_container = (
+                f"harnesseval-agent-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+                if agent_deadline is not None
+                else None
+            )
             command = [
-                "docker", "run", "--rm", "--init", "--network", "bridge",
-                "--add-host", "host.docker.internal:host-gateway",
-                "--read-only", "--tmpfs", "/tmp:rw,exec,nosuid,size=1g",
-                "-e", "HOME=/tmp", "-e", f"PERSEUS_ENABLED={1 if enabled else 0}",
-                "-e", f"PERSEUS_SAFE_TOOLS={','.join(safe_tools)}",
-                "-e", "PERSEUS_STATE_DIR=/tmp/perseus-state",
-                "-e", f"PERSEUS_TRACE_FILE=/job/{turn_trace.name}",
-                "-e", "HARNESSEVAL_TOOL_MANIFEST=/job/tool_manifest.json",
-                "-e", f"HARNESSEVAL_TOOL_ENDPOINT={product_endpoint}",
-                *egress_flags(platform, "bridge"),
+                "docker",
+                "run",
+                "--rm",
+                "--init",
             ]
+            if turn_container is not None:
+                command.extend(["--name", turn_container])
+            command.extend([
+                "--network",
+                "bridge",
+                "--add-host",
+                host_alias,
+                "--read-only",
+                "--tmpfs",
+                "/tmp:rw,exec,nosuid,size=1g",
+                "-e",
+                "HOME=/tmp",
+                "-e",
+                f"PERSEUS_ENABLED={1 if enabled else 0}",
+                "-e",
+                f"PERSEUS_SAFE_TOOLS={','.join(safe_tools)}",
+                "-e",
+                "PERSEUS_STATE_DIR=/tmp/perseus-state",
+                "-e",
+                f"PERSEUS_TRACE_FILE=/job/{turn_trace.name}",
+                "-e",
+                "HARNESSEVAL_TOOL_MANIFEST=/job/tool_manifest.json",
+                "-e",
+                f"HARNESSEVAL_TOOL_ENDPOINT={product_endpoint}",
+                *egress_flags(platform, "bridge", direct_hosts),
+            ])
             if task_system_time:
                 command.extend(["-e", f"PI_SYSTEM_DATE={task_system_time.split()[0]}"])
             for name in API_ENV:
@@ -679,23 +1230,59 @@ def run_mode(
                     command.extend(["-e", name])
             command.extend(
                 [
-                    "-v", f"{mode_dir}:/job:rw",
-                    "-v", f"{extension}:/opt/perseus/integrations/harnesseval/tool_bridge_extension.ts:ro",
-                    "-v", f"{system_prompt_source}:/opt/perseus/harness/packages/coding-agent/src/core/system-prompt.ts:ro",
-                    "-w", "/tmp",
+                    "-v",
+                    f"{mode_dir}:/job:rw",
+                    "-v",
+                    f"{extension}:/opt/perseus/integrations/harnesseval/tool_bridge_extension.ts:ro",
+                    "-v",
+                    f"{system_prompt_source}:/opt/perseus/harness/packages/coding-agent/src/core/system-prompt.ts:ro",
+                    "-w",
+                    product_working_directory(benchmark.id),
                     image,
                     "/opt/perseus/perseus",
-                    "--mode", "json", "--no-session", "--print", "--no-context-files",
-                    "--no-skills", "--no-prompt-templates", "--no-builtin-tools",
-                    "--extension", "/opt/perseus/integrations/harnesseval/tool_bridge_extension.ts",
-                    "--tools", ",".join(tools),
-                    "-p", str(manifest["prompt"]),
+                    "--mode",
+                    "json",
+                    "--no-session",
+                    "--print",
+                    "--no-context-files",
+                    "--no-skills",
+                    "--no-prompt-templates",
+                    "--no-builtin-tools",
+                    "--extension",
+                    "/opt/perseus/integrations/harnesseval/tool_bridge_extension.ts",
+                    "--tools",
+                    ",".join(tools),
+                    "-p",
+                    str(manifest["prompt"]),
                 ]
             )
             started = time.perf_counter()
-            turn_returncode = record_json_stream(command, turn_events, turn_stderr)
+            remaining = (
+                max(0.001, agent_deadline - time.monotonic())
+                if agent_deadline is not None
+                else None
+            )
+            turn_returncode = record_json_stream(
+                command,
+                turn_events,
+                turn_stderr,
+                timeout_sec=remaining,
+                container_name=turn_container,
+            )
             agent_seconds += time.perf_counter() - started
             returncodes.append(turn_returncode)
+            agent_timed_out = turn_returncode == 124 and agent_deadline is not None
+            if agent_timed_out and benchmark.id in TASK_BENCHMARKS:
+                # Cancelling the product container disconnects an in-flight tool HTTP call;
+                # explicitly cancel it in the bridge as well so its docker exec process is
+                # gone before the same task container enters shared verification.
+                try:
+                    request_json(f"{server_url}/cancel", {}, timeout=45)
+                except Exception as exc:
+                    with turn_stderr.open("a", encoding="utf-8") as stderr:
+                        stderr.write(
+                            f"Unable to cancel in-flight task command: {exc}\n"
+                        )
             turn_rows, _ = jsonl(turn_events)
             turn_answer = assistant_text(turn_rows)
             turn_actor = actor_metrics(turn_rows)
@@ -721,12 +1308,17 @@ def run_mode(
                 rows, _ = jsonl(path)
                 accumulated_events.extend(rows)
             accumulated_actor = actor_metrics(accumulated_events)
+            committed_calls = (
+                first_assistant_tool_calls(accumulated_events)
+                if lifecycle == DECLARATION_ONLY_LIFECYCLE
+                else accumulated_actor["committed_calls"]
+            )
             bridge_result = request_json(
                 f"{server_url}/final",
                 {
                     "profile": mode,
                     "answer": turn_answer,
-                    "committed_calls": accumulated_actor["committed_calls"],
+                    "committed_calls": committed_calls,
                 },
                 timeout=None,
             )
@@ -753,7 +1345,10 @@ def run_mode(
         answer = assistant_text(events)
         score_answer = scorer_answer(benchmark.id, answer)
         actor = actor_metrics(events)
-        if benchmark.id in TASK_BENCHMARKS:
+        if lifecycle == DECLARATION_ONLY_LIFECYCLE:
+            actor["committed_calls"] = first_assistant_tool_calls(events)
+        bridge_error = tool_bridge_failure(benchmark.id, bridge_result)
+        if benchmark.id in TASK_BENCHMARKS and not bridge_error:
             bridge_result.update(
                 finalize_task(
                     platform=platform,
@@ -763,21 +1358,60 @@ def run_mode(
                     handle=handle,
                 )
             )
+        elif bridge_error:
+            bridge_result.update(
+                {
+                    "native_score_status": "infra_failed",
+                    "native_score": None,
+                    "native_reward": None,
+                    "termination_reason": "tool_bridge_infrastructure",
+                }
+            )
         provider_failed = actor["last_stop_reason"] == "error"
-        answer_produced = not provider_failed and bool(answer.strip())
-        runtime_completed = answer_produced and actor["last_stop_reason"] == "stop"
+        declaration_answer = (
+            lifecycle == DECLARATION_ONLY_LIFECYCLE
+            and bool(actor["committed_calls"])
+            and actor["last_stop_reason"] == "toolUse"
+        )
+        answer_produced = not provider_failed and (bool(answer.strip()) or declaration_answer)
+        runtime_completed = answer_produced and (
+            actor["last_stop_reason"] == "stop" or declaration_answer
+        )
+        native_infra_failed = (
+            benchmark.id == "terminal-bench-2"
+            and bridge_result.get("native_score_status") != "completed"
+        )
         failure_kind = None
         runtime_warning = None
-        if provider_failed:
+        error = None
+        if agent_timed_out:
+            failure_kind = "agent_timeout"
+            error = f"Agent exceeded its {agent_timeout_sec:.1f}s wall-clock timeout"
+        elif bridge_error:
+            failure_kind = "tool_bridge_infrastructure"
+            error = bridge_error
+        elif native_infra_failed:
+            failure_kind = "verifier_infrastructure"
+            error = bridge_result.get("verifier_error") or "Native verifier failed"
+        elif provider_failed:
             failure_kind = "provider_error"
+            error = actor.get("last_error")
         elif not answer_produced:
             failure_kind = "no_final_answer"
         elif returncode != 0:
             runtime_warning = "post_answer_runtime_error"
         result = {
             "schema_version": 1,
-            "status": "completed" if runtime_completed else "failed",
+            "status": (
+                "completed"
+                if runtime_completed
+                and not agent_timed_out
+                and not bridge_error
+                and not native_infra_failed
+                else "failed"
+            ),
             "failure_kind": failure_kind,
+            "error": error,
             "benchmark": benchmark.id,
             "case_id": case_id,
             "profile": mode,
@@ -826,12 +1460,15 @@ def run_mode(
         if handle is not None:
             handle.log.close()
             if handle.task_container:
-                subprocess.run(
-                    platform._docker("rm", "-f", handle.task_container),
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                )
+                if benchmark.id == "terminal-bench-2":
+                    platform._terminal_remove_container(handle.task_container)
+                else:
+                    subprocess.run(
+                        platform._docker("rm", "-f", handle.task_container),
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
 
 
 def main() -> None:
@@ -856,10 +1493,16 @@ def main() -> None:
     platform = Platform(root, (args.orch_root or root.parent).resolve(), root / "catalog" / "benchmarks.json")
     benchmark = platform.catalog.get(args.benchmark)
     if benchmark.id == "terminal-bench-2":
-        if not platform.image_exists(benchmark.adapter["image"]):
-            raise SystemExit(f"Benchmark task image is missing: {benchmark.adapter['image']}")
+        task_dir, task_metadata = platform._terminal_metadata(benchmark, args.case)
+        task_image = task_metadata.get("environment", {}).get("docker_image") or benchmark.adapter["image"]
+        if not platform.image_exists(task_image):
+            pulled = subprocess.run(platform._docker("pull", task_image), check=False)
+            if pulled.returncode != 0 or not platform.image_exists(task_image):
+                raise SystemExit(f"Unable to pull benchmark task image for {args.case}: {task_image}")
     elif not platform.image_is_current(benchmark.adapter):
-        raise SystemExit(f"Benchmark image is missing or stale: {benchmark.adapter['image']}")
+        built = platform.build(benchmark)
+        if built.get("status") != "completed" or not platform.image_is_current(benchmark.adapter):
+            raise SystemExit(f"Unable to build current benchmark image: {benchmark.adapter['image']}: {built}")
     prepared = (
         None
         if benchmark.id in NATIVE_EPISODE_BENCHMARKS | TASK_BENCHMARKS

@@ -6,6 +6,11 @@ type ToolEntry = {
 	parameters?: Record<string, unknown>;
 };
 
+type ToolManifest = {
+	tools: ToolEntry[];
+	metadata?: { lifecycle?: string };
+};
+
 type SpeculativeDetails = {
 	harnessevalSpeculation?: {
 		id: string;
@@ -14,6 +19,58 @@ type SpeculativeDetails = {
 	};
 };
 
+type ToolContent =
+	| { type: "text"; text: string }
+	| { type: "image"; data: string; mimeType: string };
+
+const WIRE_IMAGE_MARKER = "_harnesseval_image";
+const DECLARATION_ONLY_LIFECYCLE = "single_turn_declaration_only";
+
+function stripWireImages(value: unknown, images: ToolContent[]): unknown {
+	if (Array.isArray(value)) return value.map((item) => stripWireImages(item, images));
+	if (value === null || typeof value !== "object") return value;
+
+	const source = value as Record<string, unknown>;
+	const marker = source[WIRE_IMAGE_MARKER];
+	if (marker !== null && typeof marker === "object") {
+		const encoded = marker as Record<string, unknown>;
+		if (typeof encoded.data === "string" && typeof encoded.mime_type === "string") {
+			images.push({ type: "image", data: encoded.data, mimeType: encoded.mime_type });
+		}
+	}
+	const visible: Record<string, unknown> = {};
+	for (const [key, item] of Object.entries(source)) {
+		if (key !== WIRE_IMAGE_MARKER) visible[key] = stripWireImages(item, images);
+	}
+	return visible;
+}
+
+export function toolResultContent(payload: unknown): ToolContent[] {
+	const images: ToolContent[] = [];
+	const visible = stripWireImages(payload, images);
+	return [{ type: "text", text: JSON.stringify(visible) ?? "null" }, ...images];
+}
+
+export function declarationOnlyToolResult(tool: string, arguments_: Record<string, unknown>) {
+	return {
+		content: toolResultContent({
+			ok: true,
+			result: {
+				recorded_function_call: tool,
+				arguments: arguments_,
+				declaration_only: true,
+				execution: "not_run",
+			},
+		}),
+		details: { harnessevalDeclarationOnly: true },
+		isError: false,
+		// BFCL evaluates the first assistant tool-call batch itself. This hint makes the
+		// agent end immediately after that batch instead of asking the actor for another
+		// turn with synthetic tool observations.
+		terminate: true,
+	};
+}
+
 function required(name: string): string {
 	const value = process.env[name]?.trim();
 	if (!value) throw new Error(`${name} is required`);
@@ -21,9 +78,12 @@ function required(name: string): string {
 }
 
 export default function harnessevalToolBridge(api: any) {
-	const manifest = JSON.parse(readFileSync(required("HARNESSEVAL_TOOL_MANIFEST"), "utf8"));
+	const manifest = JSON.parse(
+		readFileSync(required("HARNESSEVAL_TOOL_MANIFEST"), "utf8"),
+	) as ToolManifest;
 	if (!Array.isArray(manifest.tools)) throw new Error("HarnessEval manifest tools must be an array");
 	const endpoint = required("HARNESSEVAL_TOOL_ENDPOINT").replace(/\/+$/, "");
+	const declarationOnly = manifest.metadata?.lifecycle === DECLARATION_ONLY_LIFECYCLE;
 	api.on("tool_result", async (event: any) => {
 		const speculation = (event.details as SpeculativeDetails | undefined)?.harnessevalSpeculation;
 		if (!speculation) return undefined;
@@ -38,7 +98,7 @@ export default function harnessevalToolBridge(api: any) {
 		});
 		const payload = await response.json();
 		return {
-			content: [{ type: "text", text: JSON.stringify(payload) }],
+			content: toolResultContent(payload),
 			details: { harnessevalSpeculationCommitted: speculation.id },
 			isError: !response.ok || payload?.ok === false,
 		};
@@ -50,6 +110,7 @@ export default function harnessevalToolBridge(api: any) {
 			description: entry.description || `HarnessEval tool ${entry.name}`,
 			parameters: entry.parameters || { type: "object", properties: {} },
 			async execute(toolCallId: string, params: Record<string, unknown>) {
+				if (declarationOnly) return declarationOnlyToolResult(entry.name, params ?? {});
 				try {
 					const response = await fetch(`${endpoint}/execute`, {
 						method: "POST",
@@ -65,7 +126,7 @@ export default function harnessevalToolBridge(api: any) {
 					const visiblePayload = { ...payload };
 					delete visiblePayload._harnesseval_speculation_id;
 					return {
-						content: [{ type: "text", text: JSON.stringify(visiblePayload) }],
+						content: toolResultContent(visiblePayload),
 						details:
 							typeof speculationId === "string"
 								? {
