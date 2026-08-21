@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -231,6 +231,81 @@ def atomic_json(path: Path, value: Any) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, path)
+
+
+def next_attempt_dir(root: Path) -> Path:
+    """Allocate an immutable numbered attempt directory without deleting prior evidence."""
+
+    attempts = root / "attempts"
+    attempts.mkdir(parents=True, exist_ok=True)
+    numbers = [
+        int(path.name)
+        for path in attempts.iterdir()
+        if path.is_dir() and path.name.isdigit()
+    ]
+    attempt = attempts / f"{(max(numbers, default=0) + 1):04d}"
+    attempt.mkdir()
+    return attempt
+
+
+def git_worktree_identity(root: Path, prefix: str) -> dict[str, Any]:
+    revision = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    status = subprocess.run(
+        ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    listed = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "-co", "--exclude-standard", "-z"],
+        capture_output=True,
+        check=False,
+    )
+    digest = hashlib.sha256()
+    if listed.returncode == 0:
+        for raw_relative in sorted(item for item in listed.stdout.split(b"\0") if item):
+            path = root / raw_relative.decode("utf-8", errors="surrogateescape")
+            if path.is_file():
+                digest.update(raw_relative)
+                digest.update(b"\0")
+                digest.update(path.read_bytes())
+                digest.update(b"\0")
+    return {
+        f"{prefix}_git_sha": revision.stdout.strip() if revision.returncode == 0 else None,
+        f"{prefix}_git_dirty": bool(status.stdout.strip()) if status.returncode == 0 else None,
+        f"{prefix}_worktree_sha256": digest.hexdigest() if listed.returncode == 0 else None,
+    }
+
+
+def product_implementation_identity(platform: Any, image: str) -> dict[str, Any]:
+    perseus_root = Path(__file__).resolve().parents[2]
+    try:
+        inspected = subprocess.run(
+            ["docker", "image", "inspect", image],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        inspected = subprocess.CompletedProcess([], 1, "", "docker unavailable")
+    image_identity = None
+    if inspected.returncode == 0:
+        value = json.loads(inspected.stdout)[0]
+        image_identity = {
+            "name": image,
+            "id": value.get("Id"),
+            "repo_digests": sorted(value.get("RepoDigests") or []),
+        }
+    return {
+        **platform.implementation_identity(),
+        **git_worktree_identity(perseus_root, "perseus"),
+        "product_image": image_identity,
+    }
 
 
 def request_json(
@@ -1019,12 +1094,11 @@ def run_mode(
     enabled: bool,
 ) -> dict[str, Any]:
     mode = "perseus" if enabled else "actor-only"
-    mode_dir = (
+    mode_root = (
         run_dir / benchmark.id / case_id.replace("/", "_").replace(":", "_") / mode
     )
-    if mode_dir.exists():
-        shutil.rmtree(mode_dir)
-    mode_dir.mkdir(parents=True)
+    mode_root.mkdir(parents=True, exist_ok=True)
+    mode_dir = next_attempt_dir(mode_root)
     handle: ToolServerHandle | None = None
     system_prompt_source = (
         Path(__file__).resolve().parents[2]
@@ -1441,6 +1515,8 @@ def run_mode(
             },
             "environment_names": sorted(name for name in API_ENV if name in os.environ),
             "artifacts": {
+                "attempt": str(mode_dir),
+                "mode_root": str(mode_root),
                 "events": str(events_path),
                 "stderr": str(stderr_path),
                 "trace": str(mode_dir / "perseus-trace.jsonl"),
@@ -1510,6 +1586,7 @@ def main() -> None:
     )
     extension = Path(__file__).resolve().with_name("tool_bridge_extension.ts")
     modes = [True, False] if args.mode == "both" else [args.mode == "perseus"]
+    implementation = product_implementation_identity(platform, args.image)
     results = [
         run_mode(
             platform=platform,
@@ -1524,18 +1601,35 @@ def main() -> None:
         for enabled in modes
     ]
     for result in results:
+        result["implementation"] = implementation
         result["score"] = score_result(benchmark.id, prepared, result)
         mode_dir = Path(result["artifacts"]["events"]).parent
         atomic_json(mode_dir / "result.json", result)
+        mode_root = Path(result["artifacts"]["mode_root"])
+        atomic_json(mode_root / "result.json", result)
+        atomic_json(
+            mode_root / "latest.json",
+            {
+                "schema_version": 1,
+                "attempt": result["artifacts"]["attempt"],
+                "result": str(mode_dir / "result.json"),
+            },
+        )
     pair_results = list(results)
+    counterpart_note = None
     if args.mode != "both":
         case_slug = args.case.replace("/", "_").replace(":", "_")
         counterpart = "actor-only" if args.mode == "perseus" else "perseus"
         counterpart_path = args.run_dir.resolve() / benchmark.id / case_slug / counterpart / "result.json"
         if counterpart_path.is_file():
             stored = json.loads(counterpart_path.read_text(encoding="utf-8"))
-            if isinstance(stored, dict):
+            if isinstance(stored, dict) and stored.get("implementation") == implementation:
                 pair_results.append(stored)
+            elif isinstance(stored, dict):
+                counterpart_note = (
+                    f"Ignored {counterpart_path}: implementation identity differs; "
+                    "run both modes under one pinned implementation to form a matched pair"
+                )
     pair_results.sort(key=lambda item: 0 if item.get("profile") == "perseus" else 1)
     pair = {
         "schema_version": 1,
@@ -1544,10 +1638,16 @@ def main() -> None:
         "case_id": args.case,
         "matched_variables": ["case", "prompt", "tools", "actor model", "thinking", "network"],
         "independent_variable": "PERSEUS_ENABLED",
+        "implementation": implementation,
+        "counterpart_note": counterpart_note,
         "results": pair_results,
     }
     case_slug = args.case.replace("/", "_").replace(":", "_")
-    atomic_json(args.run_dir.resolve() / benchmark.id / case_slug / "pair.json", pair)
+    case_root = args.run_dir.resolve() / benchmark.id / case_slug
+    pair_attempt = next_attempt_dir(case_root / "pair-history")
+    pair["artifact"] = str(pair_attempt / "pair.json")
+    atomic_json(pair_attempt / "pair.json", pair)
+    atomic_json(case_root / "pair.json", pair)
     print(
         json.dumps(
             {

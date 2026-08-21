@@ -21,6 +21,23 @@ SPEC.loader.exec_module(runner)
 
 
 class HarnessEvalRunnerTests(unittest.TestCase):
+    def test_attempt_directories_are_immutable_and_monotonic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "mode"
+            first = runner.next_attempt_dir(root)
+            (first / "evidence.txt").write_text("keep", encoding="utf-8")
+            second = runner.next_attempt_dir(root)
+
+            self.assertEqual(first.name, "0001")
+            self.assertEqual(second.name, "0002")
+            self.assertEqual((first / "evidence.txt").read_text(encoding="utf-8"), "keep")
+
+    def test_git_worktree_identity_records_revision_and_content(self) -> None:
+        identity = runner.git_worktree_identity(ROOT, "perseus")
+        self.assertRegex(identity["perseus_git_sha"], r"^[0-9a-f]{40}$")
+        self.assertIsInstance(identity["perseus_git_dirty"], bool)
+        self.assertRegex(identity["perseus_worktree_sha256"], r"^[0-9a-f]{64}$")
+
     class DockerPlatform:
         @staticmethod
         def _docker(*arguments):
