@@ -50,6 +50,17 @@ try {
 	});
 	assert.equal(generic.providers["openai-compatible"].compat.thinkingFormat, undefined);
 	assert.equal(generic.providers["openai-compatible"].models[0].reasoning, false);
+	assert.equal(generic.providers["openai-compatible"].headers["User-Agent"], "Perseus/0.1");
+
+	const anthropic = generate("anthropic", {
+		PERSEUS_ACTOR_PROVIDER: "packy",
+		PERSEUS_ACTOR_BASE_URL: "https://provider.example",
+		PERSEUS_ACTOR_API_TYPE: "anthropic-messages",
+		PERSEUS_ACTOR_USER_AGENT: "gateway-client/2",
+		PERSEUS_ACTOR_THINKING: "high",
+	});
+	assert.equal(anthropic.providers.packy.api, "anthropic-messages");
+	assert.equal(anthropic.providers.packy.headers["User-Agent"], "gateway-client/2");
 	console.log("PERSEUS provider reasoning configuration tests passed");
 } finally {
 	rmSync(state, { recursive: true, force: true });

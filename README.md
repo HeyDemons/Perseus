@@ -30,7 +30,8 @@ settings are sent only when the operator configures them.
 
 ## Run
 
-Requirements: Node.js 22.19+, npm, rsync, and an OpenAI-compatible API.
+Requirements: Node.js 22.19+, npm, rsync, and either an OpenAI-compatible or
+Anthropic Messages-compatible API.
 
 ```bash
 cp perseus.env.example .env.local
@@ -50,6 +51,22 @@ export PERSEUS_ACTOR_MODEL=model-id
 export PERSEUS_ACTOR_BASE_URL=https://provider.example/v1
 export PERSEUS_ACTOR_API_KEY=...
 ```
+
+For an Anthropic-compatible gateway, keep the same CLI and select its native
+transport explicitly:
+
+```bash
+export PERSEUS_ACTOR_PROVIDER=provider-id
+export PERSEUS_ACTOR_MODEL=claude-model-id
+export PERSEUS_ACTOR_BASE_URL=https://provider.example
+export PERSEUS_ACTOR_API_TYPE=anthropic-messages
+export PERSEUS_ACTOR_API_KEY=...
+./perseus --print --no-session -p "Inspect this workspace and report its package name."
+```
+
+`PERSEUS_ACTOR_USER_AGENT` defaults to `Perseus/0.1` and can be overridden for
+Anthropic-compatible gateways that require a specific client identity. The
+Speculator inherits it unless `PERSEUS_SPECULATOR_USER_AGENT` is set.
 
 The Speculator uses the Actor endpoint by default. Configure the
 `PERSEUS_SPECULATOR_*` variables to use a faster compatible endpoint. Keep
@@ -74,6 +91,17 @@ artifacts:
 
 ```bash
 bash integrations/harnesseval/run-smoke.sh
+```
+
+For a benchmark case, the repository also provides a CLI that runs PERSEUS and
+its matched Actor-only control under the same prepared case and scorer:
+
+```bash
+python3 integrations/harnesseval/run-benchmark-pair.py gaia \
+  --case CASE_ID \
+  --run-dir "$HOME/perseus-eval/runs/gaia-pair" \
+  --harnesseval-root "$HOME/perseus-eval/HarnessEval" \
+  --mode both
 ```
 
 The smoke performs a real API, Speculator, Actor, read tools, write tool, and

@@ -27,12 +27,14 @@ API_ENV = (
     "PERSEUS_ACTOR_BASE_URL",
     "PERSEUS_ACTOR_API_TYPE",
     "PERSEUS_ACTOR_API_KEY",
+    "PERSEUS_ACTOR_USER_AGENT",
     "PERSEUS_ACTOR_THINKING",
     "PERSEUS_SPECULATOR_PROVIDER",
     "PERSEUS_SPECULATOR_MODEL",
     "PERSEUS_SPECULATOR_BASE_URL",
     "PERSEUS_SPECULATOR_API_TYPE",
     "PERSEUS_SPECULATOR_API_KEY",
+    "PERSEUS_SPECULATOR_USER_AGENT",
     "PERSEUS_TOP_K",
     "PERSEUS_SPECULATOR_MAX_TOKENS",
     "PERSEUS_SPECULATOR_TIMEOUT_MS",
@@ -88,6 +90,13 @@ def wait_manifest(url: str, process: subprocess.Popen[str], log_path: Path) -> d
         try:
             return request_json(f"{url}/manifest")
         except (OSError, urllib.error.URLError, json.JSONDecodeError, RuntimeError):
+            try:
+                status = request_json(f"{url}/status")
+            except (OSError, urllib.error.URLError, json.JSONDecodeError, RuntimeError):
+                time.sleep(0.1)
+                continue
+            if status.get("state") == "failed":
+                raise RuntimeError(f"Benchmark native episode failed before manifest: {status.get('error')}")
             time.sleep(0.1)
     details = log_path.read_text(encoding="utf-8", errors="replace") if log_path.is_file() else ""
     raise RuntimeError(f"Benchmark tool server exited before becoming ready: {details}")
@@ -329,7 +338,7 @@ def start_tool_server(
     ]
     if prepared is not None:
         command.extend(["-v", f"{prepared / 'input'}:/bridge:ro"])
-    for name in ("API_URL", "TOOLBENCH_KEY"):
+    for name in ("API_URL", "TOOLBENCH_KEY", "TRAJECT_TOOL_MODE"):
         if name in os.environ:
             command.extend(["-e", name])
     if benchmark.id in NATIVE_EPISODE_BENCHMARKS:
@@ -341,7 +350,9 @@ def start_tool_server(
         policy = {"native_evaluate": True}
         command.extend(
             [
-                "-e", "HARNESS_API_BASE", "-e", "HARNESS_API_KEY", "-e", "HARNESS_MODEL",
+                "-e", "HARNESS_API_BASE", "-e", "HARNESS_API_TYPE",
+                "-e", "HARNESS_API_KEY", "-e", "HARNESS_MODEL",
+                "-e", "HARNESS_MAX_OUTPUT_TOKENS",
                 benchmark.adapter["image"],
                 "python", "-m", module,
                 "--case", case_id,

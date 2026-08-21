@@ -11,12 +11,14 @@ const actor = {
 	baseUrl: (process.env.PERSEUS_ACTOR_BASE_URL || "").trim().replace(/\/$/, ""),
 	api: (process.env.PERSEUS_ACTOR_API_TYPE || "openai-completions").trim(),
 	keyEnv: "PERSEUS_ACTOR_API_KEY",
+	userAgent: (process.env.PERSEUS_ACTOR_USER_AGENT || "Perseus/0.1").trim(),
 };
 const speculator = {
 	provider: (process.env.PERSEUS_SPECULATOR_PROVIDER || actor.provider).trim().toLowerCase(),
 	model: (process.env.PERSEUS_SPECULATOR_MODEL || actor.model).trim(),
 	baseUrl: (process.env.PERSEUS_SPECULATOR_BASE_URL || actor.baseUrl).trim().replace(/\/$/, ""),
 	api: (process.env.PERSEUS_SPECULATOR_API_TYPE || actor.api).trim(),
+	userAgent: (process.env.PERSEUS_SPECULATOR_USER_AGENT || actor.userAgent).trim(),
 	keyEnv: actor.provider === (process.env.PERSEUS_SPECULATOR_PROVIDER || actor.provider).trim().toLowerCase()
 		? "PERSEUS_ACTOR_API_KEY"
 		: "PERSEUS_SPECULATOR_API_KEY",
@@ -82,6 +84,7 @@ providers[actor.provider] = {
 	baseUrl: actor.baseUrl,
 	apiKey: `$${actor.keyEnv}`,
 	api: actor.api,
+	headers: { "User-Agent": actor.userAgent },
 	compat: compat(actor, actorSupportsReasoning),
 	models: [modelEntry(actor, actorReasoning)],
 };
@@ -94,6 +97,7 @@ if (speculator.provider === actor.provider) {
 		baseUrl: speculator.baseUrl,
 		apiKey: `$${speculator.keyEnv}`,
 		api: speculator.api,
+		headers: { "User-Agent": speculator.userAgent },
 		compat: compat(speculator, supportsReasoning(speculator, false)),
 		models: [modelEntry(speculator, false)],
 	};

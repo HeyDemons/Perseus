@@ -71,6 +71,23 @@ allow-listed environment variables.
 
 Use one of two faithful integration paths.
 
+The integration CLI exposes both paths without merging repository ownership:
+
+```bash
+python3 integrations/harnesseval/run-benchmark-pair.py BENCHMARK \
+  --case CASE_ID \
+  --run-dir "$HOME/perseus-eval/runs/BENCHMARK-pair" \
+  --harnesseval-root "$HOME/perseus-eval/HarnessEval" \
+  --mode both
+```
+
+`--mode perseus` runs only speculative execution, `--mode actor-only` runs only
+the matched control, and `--mode both` writes independently resumable results
+for both. The command is a coordinator: HarnessEval still owns Docker task
+preparation, tool transport, attempt storage, and native scoring; PERSEUS owns
+the Actor/Speculator loop. No benchmark answer or replacement prompt is added
+by the integration.
+
 ### Product Image Path
 
 For terminal, repository, and artifact workspaces, install PERSEUS in the
