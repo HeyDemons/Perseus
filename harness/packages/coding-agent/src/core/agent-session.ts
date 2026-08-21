@@ -251,6 +251,29 @@ const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "hi
 // AgentSession Class
 // ============================================================================
 
+export function isNonRetryableProviderLimitError(errorMessage: string): boolean {
+	return /GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing/i.test(
+		errorMessage,
+	);
+}
+
+/**
+ * Classify a provider error message as retryable.
+ *
+ * Match: overloaded_error, provider returned error, rate limit, 429, 500, 502, 503, 504,
+ * service unavailable (including "service temporarily unavailable" and other wordings a
+ * relay may insert between the two words), network/connection errors (including connection
+ * lost), WebSocket transport closes/errors, fetch failed, premature stream endings, HTTP/2
+ * closed before response, terminated, retry delay exceeded.
+ */
+export function isRetryableProviderErrorMessage(errorMessage: string): boolean {
+	if (!errorMessage) return false;
+	if (isNonRetryableProviderLimitError(errorMessage)) return false;
+	return /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.{0,24}unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|stream ended before message_stop|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i.test(
+		errorMessage,
+	);
+}
+
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -2447,9 +2470,7 @@ export class AgentSession {
 	// =========================================================================
 
 	private _isNonRetryableProviderLimitError(errorMessage: string): boolean {
-		return /GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing/i.test(
-			errorMessage,
-		);
+		return isNonRetryableProviderLimitError(errorMessage);
 	}
 
 	/**
@@ -2463,12 +2484,7 @@ export class AgentSession {
 		const contextWindow = this.model?.contextWindow ?? 0;
 		if (isContextOverflow(message, contextWindow)) return false;
 
-		const err = message.errorMessage;
-		if (this._isNonRetryableProviderLimitError(err)) return false;
-		// Match: overloaded_error, provider returned error, rate limit, 429, 500, 502, 503, 504, service unavailable, network/connection errors (including connection lost), WebSocket transport closes/errors, fetch failed, premature stream endings, HTTP/2 closed before response, terminated, retry delay exceeded
-		return /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|connection.?lost|websocket.?closed|websocket.?error|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|stream ended before message_stop|http2 request did not get a response|timed? out|timeout|terminated|retry delay/i.test(
-			err,
-		);
+		return isRetryableProviderErrorMessage(message.errorMessage);
 	}
 
 	/**
