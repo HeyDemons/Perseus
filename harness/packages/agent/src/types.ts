@@ -239,6 +239,11 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	speculativeDepth?: 1 | 2;
 	/** Minimum candidate confidence allowed to start a depth-two Actor continuation. */
 	speculativeDepthMinConfidence?: number;
+	/** Optional, explicitly lossy verification pass before accepting a tool-using run's final answer. */
+	verificationCritic?: {
+		maxPasses: number;
+		prompt: string;
+	};
 
 	/**
 	 * Resolves an API key dynamically for each LLM call.

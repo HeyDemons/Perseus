@@ -168,6 +168,9 @@ async function runLoop(
 	let firstTurn = true;
 	let requestIndex = 0;
 	let prefetchedResponse: Promise<AssistantMessage | undefined> | undefined;
+	let verificationPasses = 0;
+	let verificationActive = false;
+	let hasExecutedTools = false;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
@@ -238,6 +241,7 @@ async function runLoop(
 					streamed.speculativeTurn,
 				);
 				toolResults.push(...executedToolBatch.messages);
+				hasExecutedTools = hasExecutedTools || executedToolBatch.messages.length > 0;
 				hasMoreToolCalls = !executedToolBatch.terminate;
 
 				for (const result of toolResults) {
@@ -276,6 +280,41 @@ async function runLoop(
 				});
 
 			pendingMessages = (await config.getSteeringMessages?.()) || [];
+			if (
+				!shouldStop &&
+				message.stopReason === "stop" &&
+				toolCalls.length === 0 &&
+				verificationActive
+			) {
+				verificationActive = false;
+				config.speculativeActions?.record({
+					event: "critic_completed",
+					requestIndex: requestIndex - 1,
+					pass: verificationPasses,
+				});
+			}
+			if (
+				!shouldStop &&
+				message.stopReason === "stop" &&
+				toolCalls.length === 0 &&
+				hasExecutedTools &&
+				pendingMessages.length === 0 &&
+				config.verificationCritic &&
+				verificationPasses < config.verificationCritic.maxPasses
+			) {
+				verificationPasses += 1;
+				verificationActive = true;
+				pendingMessages = [{
+					role: "user",
+					content: config.verificationCritic.prompt,
+					timestamp: Date.now(),
+				}];
+				config.speculativeActions?.record({
+					event: "critic_requested",
+					requestIndex: requestIndex - 1,
+					pass: verificationPasses,
+				});
+			}
 			if (!shouldStop && hasMoreToolCalls && pendingMessages.length === 0) {
 				const claimed = await streamed.speculativeTurn?.claimContinuation(currentContext, config);
 				prefetchedResponse = claimed?.response;

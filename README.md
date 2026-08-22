@@ -102,6 +102,14 @@ variant rather than the strict transcript-preserving PERSEUS configuration.
 Set `PERSEUS_CANONICAL_TOOL_STATE=1` without depth two to run its matched
 projection-only control.
 
+`PERSEUS_CRITIC=1` enables a separate correctness-oriented variant. After a
+tool-using run first tries to finalize, the runtime inserts one verification
+gate that requires the Actor to run task-specific checks, inspect failures,
+and correct the artifact before producing the accepted final answer.
+`PERSEUS_CRITIC_MAX_PASSES` defaults to one. This mode intentionally changes
+the trajectory and is reported as `perseus-critic`; it is not part of the
+lossless latency-only PERSEUS contract.
+
 ## Verify
 
 ```bash

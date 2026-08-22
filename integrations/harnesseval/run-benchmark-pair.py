@@ -1172,6 +1172,7 @@ def run_mode(
     image: str,
     extension: Path,
     enabled: bool,
+    critic: bool = False,
 ) -> dict[str, Any]:
     total_arm_timeout_sec = arm_timeout_sec()
     arm_deadline = (
@@ -1180,7 +1181,7 @@ def run_mode(
         else None
     )
     verifier_reserve_sec = terminal_verifier_reserve_sec(total_arm_timeout_sec)
-    mode = "perseus" if enabled else "actor-only"
+    mode = "perseus-critic" if critic else ("perseus" if enabled else "actor-only")
     mode_root = (
         run_dir / benchmark.id / case_id.replace("/", "_").replace(":", "_") / mode
     )
@@ -1280,6 +1281,7 @@ def run_mode(
                     "case_id": case_id,
                     "profile": mode,
                     "perseus_enabled": enabled,
+                    "verification_critic": critic,
                     "speculative_depth": 2 if enabled and os.environ.get("PERSEUS_DEPTH2") == "1" else 1,
                     "canonical_tool_state": (
                         os.environ.get("PERSEUS_DEPTH2") == "1"
@@ -1379,6 +1381,10 @@ def run_mode(
                 "HOME=/tmp",
                 "-e",
                 f"PERSEUS_ENABLED={1 if enabled else 0}",
+                "-e",
+                f"PERSEUS_CRITIC={1 if critic else 0}",
+                "-e",
+                f"PERSEUS_CRITIC_MAX_PASSES={max(1, int(os.environ.get('PERSEUS_CRITIC_MAX_PASSES', '1')))}",
                 "-e",
                 f"PERSEUS_SAFE_TOOLS={','.join(safe_tools)}",
                 "-e",
@@ -1585,6 +1591,7 @@ def run_mode(
             "case_id": case_id,
             "profile": mode,
             "perseus_enabled": enabled,
+            "verification_critic": critic,
             "speculative_depth": 2 if enabled and os.environ.get("PERSEUS_DEPTH2") == "1" else 1,
             "canonical_tool_state": (
                 os.environ.get("PERSEUS_DEPTH2") == "1"
@@ -1657,7 +1664,11 @@ def main() -> None:
     parser.add_argument("--harnesseval-root", type=Path, required=True)
     parser.add_argument("--orch-root", type=Path)
     parser.add_argument("--image", default="perseus:harnesseval-smoke")
-    parser.add_argument("--mode", choices=("both", "perseus", "actor-only"), default="both")
+    parser.add_argument(
+        "--mode",
+        choices=("both", "perseus", "actor-only", "critic-pair", "perseus-critic"),
+        default="both",
+    )
     args = parser.parse_args()
 
     required = ("PERSEUS_ACTOR_MODEL", "PERSEUS_ACTOR_BASE_URL", "PERSEUS_ACTOR_API_KEY")
@@ -1687,7 +1698,16 @@ def main() -> None:
         else platform._prepare_bridge_case(benchmark, args.case, args.run_dir)
     )
     extension = Path(__file__).resolve().with_name("tool_bridge_extension.ts")
-    modes = [True, False] if args.mode == "both" else [args.mode == "perseus"]
+    if args.mode == "both":
+        modes = [(True, False), (False, False)]
+    elif args.mode == "critic-pair":
+        modes = [(True, True), (True, False)]
+    elif args.mode == "perseus-critic":
+        modes = [(True, True)]
+    elif args.mode == "perseus":
+        modes = [(True, False)]
+    else:
+        modes = [(False, False)]
     implementation = product_implementation_identity(platform, args.image)
     results = [
         run_mode(
@@ -1699,8 +1719,9 @@ def main() -> None:
             image=args.image,
             extension=extension,
             enabled=enabled,
+            critic=critic,
         )
-        for enabled in modes
+        for enabled, critic in modes
     ]
     for result in results:
         result["implementation"] = implementation
@@ -1719,9 +1740,13 @@ def main() -> None:
         )
     pair_results = list(results)
     counterpart_note = None
-    if args.mode != "both":
+    if args.mode not in {"both", "critic-pair"}:
         case_slug = args.case.replace("/", "_").replace(":", "_")
-        counterpart = "actor-only" if args.mode == "perseus" else "perseus"
+        counterpart = {
+            "perseus": "actor-only",
+            "actor-only": "perseus",
+            "perseus-critic": "perseus",
+        }[args.mode]
         counterpart_path = args.run_dir.resolve() / benchmark.id / case_slug / counterpart / "result.json"
         if counterpart_path.is_file():
             stored = json.loads(counterpart_path.read_text(encoding="utf-8"))
@@ -1732,14 +1757,19 @@ def main() -> None:
                     f"Ignored {counterpart_path}: implementation identity differs; "
                     "run both modes under one pinned implementation to form a matched pair"
                 )
-    pair_results.sort(key=lambda item: 0 if item.get("profile") == "perseus" else 1)
+    profile_order = {"perseus-critic": 0, "perseus": 1, "actor-only": 2}
+    pair_results.sort(key=lambda item: profile_order.get(str(item.get("profile")), 9))
     pair = {
         "schema_version": 1,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "benchmark": benchmark.id,
         "case_id": args.case,
         "matched_variables": ["case", "prompt", "tools", "actor model", "thinking", "network"],
-        "independent_variable": "PERSEUS_ENABLED",
+        "independent_variable": (
+            "PERSEUS_CRITIC"
+            if args.mode in {"critic-pair", "perseus-critic"}
+            else "PERSEUS_ENABLED"
+        ),
         "implementation": implementation,
         "counterpart_note": counterpart_note,
         "results": pair_results,

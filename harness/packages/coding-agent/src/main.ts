@@ -724,6 +724,22 @@ export async function main(args: string[], options?: MainOptions) {
 		const depthTwoMinConfidence = Number.parseFloat(
 			process.env.PERSEUS_DEPTH2_MIN_CONFIDENCE || "0.9",
 		);
+		const criticEnabled = process.env.PERSEUS_CRITIC === "1";
+		const criticMaxPasses = Math.max(
+			1,
+			Number.parseInt(process.env.PERSEUS_CRITIC_MAX_PASSES || "1", 10) || 1,
+		);
+		const verificationCritic = criticEnabled
+			? {
+				maxPasses: criticMaxPasses,
+				prompt: [
+					"Verification gate: do not finalize yet.",
+					"Use the available tools to validate the produced artifact or environment state against every explicit task constraint.",
+					"Run the strongest task-specific tests or consistency checks available, inspect failures, and correct the implementation or artifact when needed.",
+					"Do not merely describe what should be checked. Perform the checks, then provide the final response.",
+				].join(" "),
+			}
+			: undefined;
 
 		const created = await createAgentSessionFromServices({
 			services,
@@ -735,6 +751,7 @@ export async function main(args: string[], options?: MainOptions) {
 			canonicalToolState,
 			speculativeDepth: depthTwoEnabled && speculativeActions ? 2 : 1,
 			speculativeDepthMinConfidence: depthTwoMinConfidence,
+			verificationCritic,
 			scopedModels: sessionOptions.scopedModels,
 			tools: sessionOptions.tools,
 			excludeTools: sessionOptions.excludeTools,

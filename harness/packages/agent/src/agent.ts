@@ -102,6 +102,7 @@ export interface AgentOptions {
 	canonicalToolState?: boolean;
 	speculativeDepth?: 1 | 2;
 	speculativeDepthMinConfidence?: number;
+	verificationCritic?: AgentLoopConfig["verificationCritic"];
 	streamFn?: StreamFn;
 	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	onPayload?: SimpleStreamOptions["onPayload"];
@@ -180,6 +181,7 @@ export class Agent {
 	public canonicalToolState: boolean;
 	public speculativeDepth: 1 | 2;
 	public speculativeDepthMinConfidence: number;
+	public verificationCritic?: AgentLoopConfig["verificationCritic"];
 	public streamFn: StreamFn;
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	public onPayload?: SimpleStreamOptions["onPayload"];
@@ -219,6 +221,7 @@ export class Agent {
 			Number.isFinite(options.speculativeDepthMinConfidence)
 				? Math.max(0, Math.min(1, options.speculativeDepthMinConfidence))
 				: 0.9;
+		this.verificationCritic = options.verificationCritic;
 		this.streamFn = options.streamFn ?? streamSimple;
 		this.getApiKey = options.getApiKey;
 		this.onPayload = options.onPayload;
@@ -457,6 +460,7 @@ export class Agent {
 			canonicalToolState: this.canonicalToolState,
 			speculativeDepth: this.speculativeDepth,
 			speculativeDepthMinConfidence: this.speculativeDepthMinConfidence,
+			verificationCritic: this.verificationCritic,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
 				if (skipInitialSteeringPoll) {

@@ -39,6 +39,18 @@ Canonical projection omits non-tool text on tool-use turns. Consequently this
 mode is an explicit experimental variant, not a claim of byte-identical
 transcript semantics relative to the default loop.
 
+## Verification Critic Variant
+
+The default Actor accepts its first final answer. The opt-in
+`perseus-critic` variant instead inserts one user-visible verification gate
+after a tool-using run first attempts to stop. The same Actor must execute the
+strongest available task-specific checks, inspect failures, repair the
+artifact when necessary, and then answer again. The gate is bounded by
+`PERSEUS_CRITIC_MAX_PASSES` and does not use a separate critic model.
+
+This variant targets task success rather than lossless latency. Its results,
+tokens, turns, and wall time must be compared separately from PERSEUS.
+
 ## Why It Is A Swarm
 
 Each candidate is an independent, non-authoritative execution branch over one

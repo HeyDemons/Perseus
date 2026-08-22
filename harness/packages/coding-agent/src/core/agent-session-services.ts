@@ -56,6 +56,7 @@ export interface CreateAgentSessionFromServicesOptions {
 	canonicalToolState?: CreateAgentSessionOptions["canonicalToolState"];
 	speculativeDepth?: CreateAgentSessionOptions["speculativeDepth"];
 	speculativeDepthMinConfidence?: CreateAgentSessionOptions["speculativeDepthMinConfidence"];
+	verificationCritic?: CreateAgentSessionOptions["verificationCritic"];
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 	tools?: string[];
 	excludeTools?: CreateAgentSessionOptions["excludeTools"];
@@ -199,6 +200,7 @@ export async function createAgentSessionFromServices(
 		canonicalToolState: options.canonicalToolState,
 		speculativeDepth: options.speculativeDepth,
 		speculativeDepthMinConfidence: options.speculativeDepthMinConfidence,
+		verificationCritic: options.verificationCritic,
 		scopedModels: options.scopedModels,
 		tools: options.tools,
 		excludeTools: options.excludeTools,

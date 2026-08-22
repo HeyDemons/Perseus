@@ -230,6 +230,8 @@ def run(request_path: Path) -> int:
                 or environment.get("PERSEUS_CANONICAL_TOOL_STATE") == "1"
             ),
             "depth2_min_confidence": float(environment.get("PERSEUS_DEPTH2_MIN_CONFIDENCE", "0.9")),
+            "verification_critic": environment.get("PERSEUS_CRITIC") == "1",
+            "critic_max_passes": int(environment.get("PERSEUS_CRITIC_MAX_PASSES", "1")),
             "safe_tools": safe_tools,
             "events": mechanism_counts,
             "metrics": speculation_metrics(trace),
