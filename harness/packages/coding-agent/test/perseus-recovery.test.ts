@@ -67,11 +67,21 @@ const beginInput = {
 };
 
 controller.record({ event: "actor_resolved", requestIndex: 0, stopReason: "error" });
-await controller.beginTurn(beginInput)?.candidates;
+await collectCandidates(controller.beginTurn(beginInput)?.candidates);
 assert.equal(predictorCalls, 0, "Actor transport recovery must not compete with another prediction request");
 
 controller.record({ event: "actor_resolved", requestIndex: 1, stopReason: "stop" });
-await controller.beginTurn({ ...beginInput, requestIndex: 2 })?.candidates;
+await collectCandidates(controller.beginTurn({ ...beginInput, requestIndex: 2 })?.candidates);
 assert.equal(predictorCalls, 1, "Speculation should resume after the authoritative Actor recovers");
 
 console.log("PERSEUS Actor recovery circuit-breaker tests passed");
+
+async function collectCandidates(source: Promise<unknown[]> | AsyncIterable<unknown> | undefined) {
+	if (!source) return [];
+	if (Symbol.asyncIterator in Object(source)) {
+		const output = [];
+		for await (const candidate of source as AsyncIterable<unknown>) output.push(candidate);
+		return output;
+	}
+	return await source;
+}

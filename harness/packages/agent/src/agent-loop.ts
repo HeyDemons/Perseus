@@ -562,9 +562,25 @@ class ActiveSpeculativeTurn {
 	}
 
 	private async launchCandidates(): Promise<void> {
-		let candidates: SpeculativeActionCandidate[];
+		let received = 0;
+		let lateRecorded = false;
 		try {
-			candidates = await this.prediction.candidates;
+			for await (const candidate of asCandidateStream(this.prediction.candidates)) {
+				received += 1;
+				if (this.actorDone || this.closed || this.parentSignal?.aborted) {
+					if (!lateRecorded) {
+						lateRecorded = true;
+						this.controller.record({
+							event: "prediction_late",
+							requestIndex: this.requestIndex,
+							turnId: this.prediction.id,
+							candidateCount: received,
+						});
+					}
+					continue;
+				}
+				this.launchCandidate(candidate, received - 1);
+			}
 		} catch (error) {
 			this.controller.record({
 				event: "prediction_error",
@@ -574,71 +590,78 @@ class ActiveSpeculativeTurn {
 			});
 			return;
 		}
-		if (this.actorDone || this.closed || this.parentSignal?.aborted) {
+		if (received === 0 && !lateRecorded && (this.actorDone || this.closed || this.parentSignal?.aborted)) {
 			this.controller.record({
 				event: "prediction_late",
 				requestIndex: this.requestIndex,
 				turnId: this.prediction.id,
-				candidateCount: candidates.length,
+				candidateCount: 0,
+			});
+		}
+	}
+
+	private launchCandidate(candidate: SpeculativeActionCandidate, index: number): void {
+		if (!this.controller.isSafeTool(candidate.toolName)) {
+			this.controller.record({
+				event: "candidate_unsafe",
+				requestIndex: this.requestIndex,
+				turnId: this.prediction.id,
+				toolName: candidate.toolName,
+				arguments: candidate.arguments,
 			});
 			return;
 		}
-
-		for (let index = 0; index < candidates.length; index += 1) {
-			if (this.actorDone || this.closed || this.parentSignal?.aborted) break;
-			const candidate = candidates[index];
-			if (!this.controller.isSafeTool(candidate.toolName)) {
-				this.controller.record({
-					event: "candidate_unsafe",
-					requestIndex: this.requestIndex,
-					turnId: this.prediction.id,
-					toolName: candidate.toolName,
-					arguments: candidate.arguments,
-				});
-				continue;
-			}
-			const prepared = prepareSpeculativeCandidate(this.context, candidate, this.prediction.id, index);
-			if (!prepared) {
-				this.controller.record({
-					event: "candidate_invalid",
-					requestIndex: this.requestIndex,
-					turnId: this.prediction.id,
-					toolName: candidate.toolName,
-					arguments: candidate.arguments,
-				});
-				continue;
-			}
-			const key = exactToolCallKey(prepared.toolCall.name, prepared.args);
-			if (this.entries.has(key)) continue;
-			const abortController = new AbortController();
-			const abort = () => abortController.abort();
-			this.parentSignal?.addEventListener("abort", abort, { once: true });
-			const startedAtMs = Date.now();
-			const promise = executePreparedToolCall(prepared, abortController.signal, async () => undefined).then((result) => {
-				const completedAtMs = Date.now();
-				this.parentSignal?.removeEventListener("abort", abort);
-				this.controller.record({
-					event: "candidate_completed",
-					requestIndex: this.requestIndex,
-					turnId: this.prediction.id,
-					toolName: candidate.toolName,
-					arguments: asRecord(prepared.args),
-					isError: result.isError,
-					latencyMs: completedAtMs - startedAtMs,
-				});
-				return { outcome: result, startedAtMs, completedAtMs };
-			});
-			this.entries.set(key, { candidate, abortController, promise, claimed: false });
+		const prepared = prepareSpeculativeCandidate(this.context, candidate, this.prediction.id, index);
+		if (!prepared) {
 			this.controller.record({
-				event: "candidate_prelaunched",
+				event: "candidate_invalid",
+				requestIndex: this.requestIndex,
+				turnId: this.prediction.id,
+				toolName: candidate.toolName,
+				arguments: candidate.arguments,
+			});
+			return;
+		}
+		const key = exactToolCallKey(prepared.toolCall.name, prepared.args);
+		if (this.entries.has(key)) return;
+		const abortController = new AbortController();
+		const abort = () => abortController.abort();
+		this.parentSignal?.addEventListener("abort", abort, { once: true });
+		const startedAtMs = Date.now();
+		const promise = executePreparedToolCall(prepared, abortController.signal, async () => undefined).then((result) => {
+			const completedAtMs = Date.now();
+			this.parentSignal?.removeEventListener("abort", abort);
+			this.controller.record({
+				event: "candidate_completed",
 				requestIndex: this.requestIndex,
 				turnId: this.prediction.id,
 				toolName: candidate.toolName,
 				arguments: asRecord(prepared.args),
-				confidence: candidate.confidence,
+				isError: result.isError,
+				latencyMs: completedAtMs - startedAtMs,
 			});
-		}
+			return { outcome: result, startedAtMs, completedAtMs };
+		});
+		this.entries.set(key, { candidate, abortController, promise, claimed: false });
+		this.controller.record({
+			event: "candidate_prelaunched",
+			requestIndex: this.requestIndex,
+			turnId: this.prediction.id,
+			toolName: candidate.toolName,
+			arguments: asRecord(prepared.args),
+			confidence: candidate.confidence,
+		});
 	}
+}
+
+async function* asCandidateStream(
+	source: SpeculativeActionsPrediction["candidates"],
+): AsyncGenerator<SpeculativeActionCandidate> {
+	if (Symbol.asyncIterator in Object(source)) {
+		for await (const candidate of source as AsyncIterable<SpeculativeActionCandidate>) yield candidate;
+		return;
+	}
+	for (const candidate of await (source as Promise<SpeculativeActionCandidate[]>)) yield candidate;
 }
 
 function prepareSpeculativeCandidate(

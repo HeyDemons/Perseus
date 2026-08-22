@@ -87,7 +87,7 @@ const beginInput = {
 
 const first = controller.beginTurn(beginInput);
 assert.ok(first);
-assert.deepEqual(await first.candidates, [
+assert.deepEqual(await collectCandidates(first.candidates), [
 	{ toolName: "read", arguments: { path: "/high" }, confidence: 0.9, rationale: undefined },
 ]);
 assert.equal(observedReasoning, "low", "Speculator thinking must be independent from Actor thinking");
@@ -101,7 +101,16 @@ assert.equal(predictorCalls, 1, "cooldown turns must not issue prediction reques
 
 const resumed = controller.beginTurn({ ...beginInput, requestIndex: 4 });
 assert.ok(resumed, "Speculation must resume after the bounded cooldown");
-await resumed.candidates;
+await collectCandidates(resumed.candidates);
 assert.equal(predictorCalls, 2);
 
 console.log("PERSEUS confidence policy and miss circuit-breaker tests passed");
+
+async function collectCandidates(source: Promise<unknown[]> | AsyncIterable<unknown>) {
+	if (Symbol.asyncIterator in Object(source)) {
+		const output = [];
+		for await (const candidate of source as AsyncIterable<unknown>) output.push(candidate);
+		return output;
+	}
+	return await source;
+}

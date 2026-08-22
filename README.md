@@ -14,7 +14,7 @@ remains the single authority for tool selection, mutations, and final output.
 
 ## Properties
 
-- asynchronous `top-k` frontier prediction on every ordinary Actor turn;
+- asynchronous, NDJSON-streamed `top-k` batch prediction on eligible Actor turns;
 - explicit safe-tool allowlist before any speculative execution;
 - canonical tool-name and structured-argument matching;
 - single execution on a hit and authoritative fallback on a miss;
@@ -81,6 +81,10 @@ trace row with measured head start, tool latency, and critical-path time saved.
 Prediction output and wall time default to 256 tokens and 5000ms; both remain
 configurable through `PERSEUS_SPECULATOR_MAX_TOKENS` and
 `PERSEUS_SPECULATOR_TIMEOUT_MS`.
+Each validated NDJSON row reaches the runtime immediately, so a high-confidence
+batch member can start before the Speculator finishes generating the remaining
+candidates. Promise-array controllers remain supported for extension
+compatibility.
 
 ## Verify
 

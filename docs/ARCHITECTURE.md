@@ -7,12 +7,14 @@ starts two paths concurrently:
 
 1. The authoritative Actor reasons over the task, complete observations, and
    registered tool schemas.
-2. The Speculator predicts up to `top-k` complete tool calls from the same
-   snapshot.
+2. The Speculator streams up to `top-k` complete tool calls from the same
+   snapshot. Candidates describe calls that may coexist in the Actor's next
+   batch rather than mutually exclusive whole-batch alternatives.
 3. The runtime validates candidate schemas and admits only explicitly safe tool
    names to the speculative frontier.
-4. Admitted candidates execute as isolated futures. Their results are not
-   appended to Actor memory.
+4. Each admitted candidate executes as an isolated future as soon as its
+   NDJSON row validates; the runtime does not wait for the remaining frontier.
+   Results are not appended to Actor memory.
 5. When the Actor emits a tool call, the runtime canonicalizes its structured
    arguments and checks the frontier.
 6. An exact match claims the corresponding future. A miss executes the Actor

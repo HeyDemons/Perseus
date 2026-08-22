@@ -152,7 +152,11 @@ export interface SpeculativeActionsBeginContext {
 /** A prediction request starts immediately and resolves without blocking the Actor. */
 export interface SpeculativeActionsPrediction {
 	id: string;
-	candidates: Promise<SpeculativeActionCandidate[]>;
+	/**
+	 * Controllers may stream candidates as soon as each one is validated. Promise arrays
+	 * remain supported for compatibility with simple policies and existing extensions.
+	 */
+	candidates: Promise<SpeculativeActionCandidate[]> | AsyncIterable<SpeculativeActionCandidate>;
 	cancel?: () => void;
 }
 

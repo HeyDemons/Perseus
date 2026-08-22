@@ -93,7 +93,7 @@ class PerseusController implements SpeculativeActionsController {
 		const abortFromParent = () => abortController.abort();
 		input.signal?.addEventListener("abort", abortFromParent, { once: true });
 		const timer = this.timeoutMs === undefined ? undefined : setTimeout(() => abortController.abort(), this.timeoutMs);
-		const candidates = this.predict(input, id, abortController.signal).finally(() => {
+		const candidates = finalizeCandidateStream(this.predict(input, id, abortController.signal), () => {
 			if (timer !== undefined) clearTimeout(timer);
 			input.signal?.removeEventListener("abort", abortFromParent);
 		});
@@ -150,11 +150,11 @@ class PerseusController implements SpeculativeActionsController {
 		}
 	}
 
-	private async predict(
+	private async *predict(
 		input: SpeculativeActionsBeginContext,
 		turnId: string,
 		signal: AbortSignal,
-	): Promise<SpeculativeActionCandidate[]> {
+	): AsyncGenerator<SpeculativeActionCandidate> {
 		const started = Date.now();
 		this.record({
 			event: "prediction_started",
@@ -175,9 +175,10 @@ class PerseusController implements SpeculativeActionsController {
 				safeForPrelaunch: this.isSafeTool(tool.name),
 			}));
 			const instruction = [
-				"Predict the exact next tool call that the authoritative Actor is most likely to emit now.",
-				`Return up to ${this.topK} alternatives in strict JSON and no prose:`,
-				'{"candidates":[{"tool":"exact_name","arguments":{},"confidence":0.0}]}',
+				"Predict the exact tool calls that the authoritative Actor is most likely to emit in its next batch.",
+				`Return up to ${this.topK} likely batch members, ordered by confidence. Calls may co-occur; they are not mutually exclusive alternatives.`,
+				"Emit one strict JSON object per line and no prose:",
+				'{"tool":"exact_name","arguments":{},"confidence":0.0}',
 				"Arguments must be complete and must use only facts already present in the conversation.",
 				"Do not solve the task, execute a tool, invent IDs, or copy parameters between unrelated tools.",
 				"Only safeForPrelaunch tools can run speculatively; unsafe predictions may be logged but will not execute.",
@@ -216,26 +217,54 @@ class PerseusController implements SpeculativeActionsController {
 					reasoning: this.thinkingLevel === "off" ? undefined : this.thinkingLevel,
 				},
 			);
-			for await (const _event of stream) {
-				// Drain the stream so the provider can complete normally.
+			let raw = "";
+			let pendingLine = "";
+			const candidates: SpeculativeActionCandidate[] = [];
+			const admittedCandidates: SpeculativeActionCandidate[] = [];
+			const seen = new Set<string>();
+			for await (const event of stream) {
+				if (event.type !== "text_delta") continue;
+				raw += event.delta;
+				pendingLine += event.delta;
+				const lines = pendingLine.split(/\r?\n/);
+				pendingLine = lines.pop() ?? "";
+				for (const line of lines) {
+					for (const candidate of uniqueCandidates(line, this.topK - candidates.length, seen)) {
+						candidates.push(candidate);
+						if (!this.admitCandidate(candidate, input.requestIndex, turnId)) continue;
+						admittedCandidates.push(candidate);
+						this.record({
+							event: "candidate_streamed",
+							requestIndex: input.requestIndex,
+							turnId,
+							toolName: candidate.toolName,
+							arguments: candidate.arguments,
+							confidence: candidate.confidence,
+							rank: candidates.length,
+							emittedAfterMs: Date.now() - started,
+						});
+						yield candidate;
+					}
+				}
 			}
 			const response = await stream.result();
-			const raw = assistantText(response);
-			const candidates = parseSpeculativeCandidates(raw, this.topK);
-			const admittedCandidates = candidates.filter((candidate) => {
-				const confidence = candidate.confidence ?? 0;
-				if (confidence >= this.minConfidence) return true;
+			const finalRaw = assistantText(response) || raw;
+			for (const candidate of uniqueCandidates(finalRaw, this.topK - candidates.length, seen)) {
+				candidates.push(candidate);
+				if (!this.admitCandidate(candidate, input.requestIndex, turnId)) continue;
+				admittedCandidates.push(candidate);
 				this.record({
-					event: "candidate_below_confidence",
+					event: "candidate_streamed",
 					requestIndex: input.requestIndex,
 					turnId,
 					toolName: candidate.toolName,
 					arguments: candidate.arguments,
-					confidence,
-					threshold: this.minConfidence,
+					confidence: candidate.confidence,
+					rank: candidates.length,
+					emittedAfterMs: Date.now() - started,
 				});
-				return false;
-			});
+				yield candidate;
+			}
 			this.record({
 				event: "prediction_completed",
 				requestIndex: input.requestIndex,
@@ -246,9 +275,8 @@ class PerseusController implements SpeculativeActionsController {
 				admittedCandidateCount: admittedCandidates.length,
 				candidates,
 				usage: response.usage,
-				raw,
+				raw: finalRaw,
 			});
-			return admittedCandidates;
 		} catch (error) {
 			this.record({
 				event: signal.aborted ? "prediction_aborted" : "prediction_failed",
@@ -257,8 +285,33 @@ class PerseusController implements SpeculativeActionsController {
 				latencyMs: Date.now() - started,
 				error: error instanceof Error ? error.message : String(error),
 			});
-			return [];
 		}
+	}
+
+	private admitCandidate(candidate: SpeculativeActionCandidate, requestIndex: number, turnId: string): boolean {
+		const confidence = candidate.confidence ?? 0;
+		if (confidence >= this.minConfidence) return true;
+		this.record({
+			event: "candidate_below_confidence",
+			requestIndex,
+			turnId,
+			toolName: candidate.toolName,
+			arguments: candidate.arguments,
+			confidence,
+			threshold: this.minConfidence,
+		});
+		return false;
+	}
+}
+
+async function* finalizeCandidateStream(
+	source: AsyncIterable<SpeculativeActionCandidate>,
+	cleanup: () => void,
+): AsyncGenerator<SpeculativeActionCandidate> {
+	try {
+		for await (const candidate of source) yield candidate;
+	} finally {
+		cleanup();
 	}
 }
 
@@ -281,14 +334,13 @@ function assistantText(message: AssistantMessage): string {
 }
 
 export function parseSpeculativeCandidates(raw: string, topK = 3): SpeculativeActionCandidate[] {
+	const candidates: SpeculativeActionCandidate[] = [];
+	const seen = new Set<string>();
 	for (const value of parseJsonValues(raw)) {
 		const rows = Array.isArray(value)
 			? value
-			: value && typeof value === "object" && Array.isArray((value as Record<string, unknown>).candidates)
-				? ((value as Record<string, unknown>).candidates as unknown[])
-				: [];
+			: speculativeRows(value);
 		if (rows.length === 0) continue;
-		const candidates: SpeculativeActionCandidate[] = [];
 		for (const row of rows) {
 			if (!row || typeof row !== "object" || Array.isArray(row)) continue;
 			const item = row as Record<string, unknown>;
@@ -298,17 +350,51 @@ export function parseSpeculativeCandidates(raw: string, topK = 3): SpeculativeAc
 			const confidence = typeof item.confidence === "number" && Number.isFinite(item.confidence)
 				? Math.max(0, Math.min(1, item.confidence))
 				: undefined;
+			const key = `${toolName}\n${stableJson(args)}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
 			candidates.push({
 				toolName,
 				arguments: args as Record<string, unknown>,
 				confidence,
 				rationale: typeof item.rationale === "string" ? item.rationale : undefined,
 			});
-			if (candidates.length >= Math.max(1, topK)) break;
+			if (candidates.length >= Math.max(1, topK)) return candidates;
 		}
-		if (candidates.length > 0) return candidates;
 	}
-	return [];
+	return candidates;
+}
+
+function speculativeRows(value: unknown): unknown[] {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+	const record = value as Record<string, unknown>;
+	if (Array.isArray(record.candidates)) return record.candidates;
+	if (Array.isArray(record.batch)) return record.batch;
+	return [record];
+}
+
+function uniqueCandidates(raw: string, limit: number, seen: Set<string>): SpeculativeActionCandidate[] {
+	if (limit <= 0) return [];
+	const output: SpeculativeActionCandidate[] = [];
+	for (const candidate of parseSpeculativeCandidates(raw, limit)) {
+		const key = `${candidate.toolName}\n${stableJson(candidate.arguments)}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		output.push(candidate);
+		if (output.length >= limit) break;
+	}
+	return output;
+}
+
+function stableJson(value: unknown): string {
+	if (Array.isArray(value)) return `[${value.map((item) => stableJson(item)).join(",")}]`;
+	if (value && typeof value === "object") {
+		const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) =>
+			left.localeCompare(right),
+		);
+		return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(",")}}`;
+	}
+	return JSON.stringify(value) ?? "null";
 }
 
 function firstString(...values: unknown[]): string {
