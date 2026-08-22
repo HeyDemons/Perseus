@@ -78,6 +78,9 @@ cooldown after four consecutive miss-only turns. Override these policies with
 `PERSEUS_SPECULATOR_MAX_MISS_TURNS`, and
 `PERSEUS_SPECULATOR_COOLDOWN_TURNS`. Exact hits emit a `speculation_saved`
 trace row with measured head start, tool latency, and critical-path time saved.
+Prediction output and wall time default to 256 tokens and 5000ms; both remain
+configurable through `PERSEUS_SPECULATOR_MAX_TOKENS` and
+`PERSEUS_SPECULATOR_TIMEOUT_MS`.
 
 ## Verify
 

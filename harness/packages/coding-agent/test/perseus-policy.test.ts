@@ -62,6 +62,7 @@ const response: AssistantMessage = {
 
 let predictorCalls = 0;
 let observedReasoning: unknown;
+let observedMaxTokens: unknown;
 const controller = createPerseusController({
 	model,
 	safeTools: ["read"],
@@ -75,9 +76,10 @@ const beginInput = {
 	actorModel: model,
 	thinkingLevel: "high" as const,
 	convertToLlm: () => [],
-	streamFn: (_model: Model<any>, _context: unknown, options: { reasoning?: unknown }) => {
+	streamFn: (_model: Model<any>, _context: unknown, options: { reasoning?: unknown; maxTokens?: unknown }) => {
 		predictorCalls += 1;
 		observedReasoning = options.reasoning;
+		observedMaxTokens = options.maxTokens;
 		return new MockAssistantStream(response);
 	},
 	requestIndex: 0,
@@ -89,6 +91,7 @@ assert.deepEqual(await first.candidates, [
 	{ toolName: "read", arguments: { path: "/high" }, confidence: 0.9, rationale: undefined },
 ]);
 assert.equal(observedReasoning, "low", "Speculator thinking must be independent from Actor thinking");
+assert.equal(observedMaxTokens, 256, "Speculator output must have a bounded default");
 
 controller.record({ event: "turn_closed", requestIndex: 0, hits: 0, misses: 1 });
 controller.record({ event: "turn_closed", requestIndex: 1, hits: 0, misses: 1 });

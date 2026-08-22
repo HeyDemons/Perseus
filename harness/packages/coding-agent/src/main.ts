@@ -676,11 +676,11 @@ export async function main(args: string[], options?: MainOptions) {
 					});
 				}
 				const configuredSpeculatorMaxTokens = Number.parseInt(
-					process.env.PERSEUS_SPECULATOR_MAX_TOKENS || "",
+					process.env.PERSEUS_SPECULATOR_MAX_TOKENS || "256",
 					10,
 				);
 				const configuredSpeculatorTimeoutMs = Number.parseInt(
-					process.env.PERSEUS_SPECULATOR_TIMEOUT_MS || "",
+					process.env.PERSEUS_SPECULATOR_TIMEOUT_MS || "5000",
 					10,
 				);
 				const configuredMinConfidence = Number.parseFloat(

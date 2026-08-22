@@ -203,6 +203,8 @@ def run(request_path: Path) -> int:
             "min_confidence": float(environment.get("PERSEUS_SPECULATOR_MIN_CONFIDENCE", "0.5")),
             "max_miss_turns": int(environment.get("PERSEUS_SPECULATOR_MAX_MISS_TURNS", "4")),
             "cooldown_turns": int(environment.get("PERSEUS_SPECULATOR_COOLDOWN_TURNS", "4")),
+            "max_tokens": int(environment.get("PERSEUS_SPECULATOR_MAX_TOKENS", "256")),
+            "timeout_ms": int(environment.get("PERSEUS_SPECULATOR_TIMEOUT_MS", "5000")),
             "safe_tools": safe_tools,
             "events": mechanism_counts,
             "metrics": speculation_metrics(trace),
