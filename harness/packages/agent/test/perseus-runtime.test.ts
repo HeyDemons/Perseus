@@ -144,6 +144,11 @@ const hit = await runScenario({ a: 1, b: 2 }, true);
 assert.equal(hit.executions, 1, "an exact hit must execute the tool only once");
 assert.ok(hit.starts[0] < hit.actorResolvedAt, "safe tool must start before the Actor resolves");
 assert.equal(hit.events.filter((event) => event.event === "cache_hit").length, 1);
+const saved = hit.events.find((event) => event.event === "speculation_saved");
+assert.ok(saved, "an exact hit must report its measured critical-path saving");
+assert.ok(Number(saved.savedMs) > 0);
+assert.ok(Number(saved.savedMs) <= Number(saved.toolLatencyMs));
+assert.ok(Number(saved.waitedMs) >= 0);
 
 const miss = await runScenario({ a: 9, b: 2 }, true);
 assert.equal(miss.executions, 2, "a strict argument miss must preserve the Actor execution");

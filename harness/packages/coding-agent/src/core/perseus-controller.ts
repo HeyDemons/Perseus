@@ -6,6 +6,7 @@ import type {
 	SpeculativeActionsBeginContext,
 	SpeculativeActionsController,
 	SpeculativeActionTraceEvent,
+	ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 
@@ -14,6 +15,10 @@ export interface PerseusControllerOptions {
 	topK?: number;
 	maxTokens?: number;
 	timeoutMs?: number;
+	thinkingLevel?: ThinkingLevel;
+	minConfidence?: number;
+	maxConsecutiveMissTurns?: number;
+	cooldownTurns?: number;
 	safeTools: Iterable<string>;
 	traceFile?: string;
 }
@@ -29,9 +34,15 @@ class PerseusController implements SpeculativeActionsController {
 	private readonly topK: number;
 	private readonly maxTokens?: number;
 	private readonly timeoutMs?: number;
+	private readonly thinkingLevel: ThinkingLevel;
+	private readonly minConfidence: number;
+	private readonly maxConsecutiveMissTurns: number;
+	private readonly cooldownTurns: number;
 	private readonly safeTools: Set<string>;
 	private readonly traceFile?: string;
 	private recoverActorWithoutSpeculation = false;
+	private consecutiveMissTurns = 0;
+	private suppressedTurnsRemaining = 0;
 
 	constructor(options: PerseusControllerOptions) {
 		this.options = options;
@@ -45,12 +56,30 @@ class PerseusController implements SpeculativeActionsController {
 			typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
 				? options.timeoutMs
 				: undefined;
+		this.thinkingLevel = options.thinkingLevel ?? "low";
+		this.minConfidence =
+			typeof options.minConfidence === "number" && Number.isFinite(options.minConfidence)
+				? Math.max(0, Math.min(1, options.minConfidence))
+				: 0.5;
+		this.maxConsecutiveMissTurns = normalizePositiveInteger(options.maxConsecutiveMissTurns, 4);
+		this.cooldownTurns = normalizePositiveInteger(options.cooldownTurns, 4);
 		this.safeTools = new Set(Array.from(options.safeTools, (name) => name.trim()).filter(Boolean));
 		this.traceFile = options.traceFile ? resolve(options.traceFile) : undefined;
 	}
 
 	beginTurn(input: SpeculativeActionsBeginContext) {
 		const id = `${input.requestIndex}-${randomUUID()}`;
+		if (this.suppressedTurnsRemaining > 0) {
+			const remainingAfterThisTurn = --this.suppressedTurnsRemaining;
+			this.record({
+				event: "prediction_suppressed",
+				requestIndex: input.requestIndex,
+				turnId: id,
+				reason: "miss_circuit_cooldown",
+				remainingTurns: remainingAfterThisTurn,
+			});
+			return undefined;
+		}
 		if (this.recoverActorWithoutSpeculation) {
 			this.record({
 				event: "prediction_suppressed",
@@ -83,6 +112,31 @@ class PerseusController implements SpeculativeActionsController {
 		if (event.event === "actor_resolved") {
 			this.recoverActorWithoutSpeculation = event.stopReason === "error";
 		}
+		let circuitEvent: SpeculativeActionTraceEvent | undefined;
+		if (event.event === "turn_closed") {
+			const hits = numericEventField(event.hits);
+			const misses = numericEventField(event.misses);
+			if (hits > 0) {
+				this.consecutiveMissTurns = 0;
+			} else if (misses > 0) {
+				this.consecutiveMissTurns += 1;
+				if (this.consecutiveMissTurns >= this.maxConsecutiveMissTurns) {
+					this.suppressedTurnsRemaining = this.cooldownTurns;
+					this.consecutiveMissTurns = 0;
+					circuitEvent = {
+						event: "miss_circuit_opened",
+						requestIndex: event.requestIndex,
+						turnId: event.turnId,
+						cooldownTurns: this.cooldownTurns,
+					};
+				}
+			}
+		}
+		this.appendTrace(event);
+		if (circuitEvent) this.appendTrace(circuitEvent);
+	}
+
+	private appendTrace(event: SpeculativeActionTraceEvent): void {
 		if (!this.traceFile) return;
 		try {
 			mkdirSync(dirname(this.traceFile), { recursive: true });
@@ -108,6 +162,8 @@ class PerseusController implements SpeculativeActionsController {
 			turnId,
 			model: `${this.options.model.provider}/${this.options.model.id}`,
 			topK: this.topK,
+			thinkingLevel: this.thinkingLevel,
+			minConfidence: this.minConfidence,
 		});
 		try {
 			const messages = await input.convertToLlm(input.context.messages);
@@ -157,7 +213,7 @@ class PerseusController implements SpeculativeActionsController {
 				{
 					signal,
 					...(this.maxTokens === undefined ? {} : { maxTokens: this.maxTokens }),
-					reasoning: undefined,
+					reasoning: this.thinkingLevel === "off" ? undefined : this.thinkingLevel,
 				},
 			);
 			for await (const _event of stream) {
@@ -166,6 +222,20 @@ class PerseusController implements SpeculativeActionsController {
 			const response = await stream.result();
 			const raw = assistantText(response);
 			const candidates = parseSpeculativeCandidates(raw, this.topK);
+			const admittedCandidates = candidates.filter((candidate) => {
+				const confidence = candidate.confidence ?? 0;
+				if (confidence >= this.minConfidence) return true;
+				this.record({
+					event: "candidate_below_confidence",
+					requestIndex: input.requestIndex,
+					turnId,
+					toolName: candidate.toolName,
+					arguments: candidate.arguments,
+					confidence,
+					threshold: this.minConfidence,
+				});
+				return false;
+			});
 			this.record({
 				event: "prediction_completed",
 				requestIndex: input.requestIndex,
@@ -173,11 +243,12 @@ class PerseusController implements SpeculativeActionsController {
 				latencyMs: Date.now() - started,
 				stopReason: response.stopReason,
 				candidateCount: candidates.length,
+				admittedCandidateCount: admittedCandidates.length,
 				candidates,
 				usage: response.usage,
 				raw,
 			});
-			return candidates;
+			return admittedCandidates;
 		} catch (error) {
 			this.record({
 				event: signal.aborted ? "prediction_aborted" : "prediction_failed",
@@ -189,6 +260,16 @@ class PerseusController implements SpeculativeActionsController {
 			return [];
 		}
 	}
+}
+
+function normalizePositiveInteger(value: number | undefined, fallback: number): number {
+	return typeof value === "number" && Number.isFinite(value) && value > 0
+		? Math.max(1, Math.floor(value))
+		: fallback;
+}
+
+function numericEventField(value: unknown): number {
+	return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 function assistantText(message: AssistantMessage): string {

@@ -21,6 +21,9 @@ python3 "${ROOT}/tests/test_harnesseval_runner.py"
     packages/coding-agent/test/perseus-recovery.test.ts
   ./node_modules/.bin/tsx \
     --tsconfig tsconfig.json \
+    packages/coding-agent/test/perseus-policy.test.ts
+  ./node_modules/.bin/tsx \
+    --tsconfig tsconfig.json \
     packages/coding-agent/test/provider-retry.test.ts
   ./node_modules/.bin/tsx \
     --tsconfig tsconfig.json \

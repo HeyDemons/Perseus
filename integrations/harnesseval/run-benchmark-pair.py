@@ -37,9 +37,13 @@ API_ENV = (
     "PERSEUS_SPECULATOR_API_TYPE",
     "PERSEUS_SPECULATOR_API_KEY",
     "PERSEUS_SPECULATOR_USER_AGENT",
+    "PERSEUS_SPECULATOR_THINKING",
     "PERSEUS_TOP_K",
     "PERSEUS_SPECULATOR_MAX_TOKENS",
     "PERSEUS_SPECULATOR_TIMEOUT_MS",
+    "PERSEUS_SPECULATOR_MIN_CONFIDENCE",
+    "PERSEUS_SPECULATOR_MAX_MISS_TURNS",
+    "PERSEUS_SPECULATOR_COOLDOWN_TURNS",
     "PERSEUS_API_TIMEOUT_MS",
     "PERSEUS_API_MAX_RETRIES",
     "PERSEUS_API_MAX_RETRY_DELAY_MS",
@@ -604,6 +608,25 @@ def mechanism_counts(trace: list[dict[str, Any]]) -> dict[str, int]:
         name = str(row.get("event") or "unknown")
         counts[name] = counts.get(name, 0) + 1
     return counts
+
+
+def speculation_metrics(trace: list[dict[str, Any]]) -> dict[str, float | int]:
+    savings = [row for row in trace if row.get("event") == "speculation_saved"]
+
+    def total(field: str) -> float:
+        return sum(
+            float(row[field])
+            for row in savings
+            if isinstance(row.get(field), (int, float))
+        )
+
+    return {
+        "resolved_hits": len(savings),
+        "saved_ms_total": total("savedMs"),
+        "tool_latency_ms_total": total("toolLatencyMs"),
+        "head_start_ms_total": total("headStartMs"),
+        "waited_ms_total": total("waitedMs"),
+    }
 
 
 def score_result(benchmark_id: str, prepared: Path | None, result: dict[str, Any]) -> dict[str, Any]:
@@ -1551,6 +1574,7 @@ def run_mode(
             },
             "native": bridge_result if benchmark.id in NATIVE_EPISODE_BENCHMARKS | TASK_BENCHMARKS else None,
             "speculation": mechanism_counts(trace),
+            "speculation_metrics": speculation_metrics(trace),
             "parse_health": {
                 "event_rows": len(events),
                 "malformed_event_rows": malformed_events,

@@ -400,8 +400,14 @@ type StreamedAssistantResponse = {
 type SpeculativeFutureEntry = {
 	candidate: SpeculativeActionCandidate;
 	abortController: AbortController;
-	promise: Promise<ExecutedToolCallOutcome>;
+	promise: Promise<SpeculativeExecutedToolCall>;
 	claimed: boolean;
+};
+
+type SpeculativeExecutedToolCall = {
+	outcome: ExecutedToolCallOutcome;
+	startedAtMs: number;
+	completedAtMs: number;
 };
 
 function startSpeculativeTurn(
@@ -506,7 +512,24 @@ class ActiveSpeculativeTurn {
 			arguments: asRecord(prepared.args),
 			confidence: entry.candidate.confidence,
 		});
-		return await entry.promise;
+		const claimedAtMs = Date.now();
+		const execution = await entry.promise;
+		const toolLatencyMs = Math.max(0, execution.completedAtMs - execution.startedAtMs);
+		const headStartMs = Math.max(0, claimedAtMs - execution.startedAtMs);
+		const savedMs = Math.min(toolLatencyMs, headStartMs);
+		this.controller.record({
+			event: "speculation_saved",
+			requestIndex: this.requestIndex,
+			turnId: this.prediction.id,
+			toolName: prepared.toolCall.name,
+			arguments: asRecord(prepared.args),
+			confidence: entry.candidate.confidence,
+			savedMs,
+			toolLatencyMs,
+			headStartMs,
+			waitedMs: Math.max(0, execution.completedAtMs - claimedAtMs),
+		});
+		return execution.outcome;
 	}
 
 	close(): void {
@@ -590,8 +613,9 @@ class ActiveSpeculativeTurn {
 			const abortController = new AbortController();
 			const abort = () => abortController.abort();
 			this.parentSignal?.addEventListener("abort", abort, { once: true });
-			const started = Date.now();
+			const startedAtMs = Date.now();
 			const promise = executePreparedToolCall(prepared, abortController.signal, async () => undefined).then((result) => {
+				const completedAtMs = Date.now();
 				this.parentSignal?.removeEventListener("abort", abort);
 				this.controller.record({
 					event: "candidate_completed",
@@ -600,9 +624,9 @@ class ActiveSpeculativeTurn {
 					toolName: candidate.toolName,
 					arguments: asRecord(prepared.args),
 					isError: result.isError,
-					latencyMs: Date.now() - started,
+					latencyMs: completedAtMs - startedAtMs,
 				});
-				return result;
+				return { outcome: result, startedAtMs, completedAtMs };
 			});
 			this.entries.set(key, { candidate, abortController, promise, claimed: false });
 			this.controller.record({

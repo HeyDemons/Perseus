@@ -9,7 +9,7 @@ import { createInterface } from "node:readline";
 import { type ImageContent, modelsAreEqual } from "@earendil-works/pi-ai";
 import { ProcessTerminal, setKeybindings, TUI } from "@earendil-works/pi-tui";
 import chalk from "chalk";
-import { type Args, type Mode, parseArgs, printHelp } from "./cli/args.ts";
+import { type Args, type Mode, isValidThinkingLevel, parseArgs, printHelp } from "./cli/args.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
@@ -665,6 +665,16 @@ export async function main(args: string[], options?: MainOptions) {
 					message: "PERSEUS has no benchmark-declared safe tools; this task will run on the Actor-only path",
 				});
 			} else {
+				const speculatorThinkingRaw = process.env.PERSEUS_SPECULATOR_THINKING?.trim() || "low";
+				const speculatorThinking = isValidThinkingLevel(speculatorThinkingRaw)
+					? speculatorThinkingRaw
+					: "low";
+				if (!isValidThinkingLevel(speculatorThinkingRaw)) {
+					diagnostics.push({
+						type: "error",
+						message: `Invalid PERSEUS_SPECULATOR_THINKING: ${speculatorThinkingRaw}`,
+					});
+				}
 				const configuredSpeculatorMaxTokens = Number.parseInt(
 					process.env.PERSEUS_SPECULATOR_MAX_TOKENS || "",
 					10,
@@ -673,9 +683,24 @@ export async function main(args: string[], options?: MainOptions) {
 					process.env.PERSEUS_SPECULATOR_TIMEOUT_MS || "",
 					10,
 				);
+				const configuredMinConfidence = Number.parseFloat(
+					process.env.PERSEUS_SPECULATOR_MIN_CONFIDENCE || "0.5",
+				);
+				const configuredMaxMissTurns = Number.parseInt(
+					process.env.PERSEUS_SPECULATOR_MAX_MISS_TURNS || "4",
+					10,
+				);
+				const configuredCooldownTurns = Number.parseInt(
+					process.env.PERSEUS_SPECULATOR_COOLDOWN_TURNS || "4",
+					10,
+				);
 				speculativeActions = createPerseusController({
 					model: speculatorModel,
 					topK: Number.parseInt(process.env.PERSEUS_TOP_K || "3", 10),
+					thinkingLevel: speculatorThinking,
+					minConfidence: configuredMinConfidence,
+					maxConsecutiveMissTurns: configuredMaxMissTurns,
+					cooldownTurns: configuredCooldownTurns,
 					maxTokens:
 						Number.isFinite(configuredSpeculatorMaxTokens) && configuredSpeculatorMaxTokens > 0
 							? configuredSpeculatorMaxTokens

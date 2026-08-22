@@ -60,6 +60,25 @@ def assistant_text(events: list[dict[str, Any]]) -> str:
     return texts[-1] if texts else ""
 
 
+def speculation_metrics(trace: list[dict[str, Any]]) -> dict[str, float | int]:
+    savings = [row for row in trace if row.get("event") == "speculation_saved"]
+
+    def total(field: str) -> float:
+        return sum(
+            float(row[field])
+            for row in savings
+            if isinstance(row.get(field), (int, float))
+        )
+
+    return {
+        "resolved_hits": len(savings),
+        "saved_ms_total": total("savedMs"),
+        "tool_latency_ms_total": total("toolLatencyMs"),
+        "head_start_ms_total": total("headStartMs"),
+        "waited_ms_total": total("waitedMs"),
+    }
+
+
 def require_job_path(value: str) -> Path:
     path = Path(value).resolve()
     if not path.is_relative_to(JOB_ROOT.resolve()):
@@ -180,8 +199,13 @@ def run(request_path: Path) -> int:
             ),
             "model": environment.get("PERSEUS_SPECULATOR_MODEL", environment.get("PERSEUS_ACTOR_MODEL", "")),
             "top_k": int(environment.get("PERSEUS_TOP_K", "3")),
+            "thinking": environment.get("PERSEUS_SPECULATOR_THINKING", "low"),
+            "min_confidence": float(environment.get("PERSEUS_SPECULATOR_MIN_CONFIDENCE", "0.5")),
+            "max_miss_turns": int(environment.get("PERSEUS_SPECULATOR_MAX_MISS_TURNS", "4")),
+            "cooldown_turns": int(environment.get("PERSEUS_SPECULATOR_COOLDOWN_TURNS", "4")),
             "safe_tools": safe_tools,
             "events": mechanism_counts,
+            "metrics": speculation_metrics(trace),
         },
         "tools": {"calls": len(tool_starts), "names": tool_names},
         "artifacts": {
