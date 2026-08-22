@@ -3,6 +3,7 @@ import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
 	EventStream,
+	type Message,
 	type Model,
 } from "@earendil-works/pi-ai";
 import {
@@ -74,13 +75,20 @@ function message(text: string): AssistantMessage {
 const firstLine = JSON.stringify({ tool: "read", arguments: { path: "/a" }, confidence: 0.9 });
 const secondLine = JSON.stringify({ tool: "read", arguments: { path: "/b" }, confidence: 0.8 });
 let timedStream: TimedAssistantStream | undefined;
+let observedContext: { systemPrompt?: string; messages: Message[] } | undefined;
+const convertedMessages = Array.from({ length: 8 }, (_, index) => ({
+	role: "user" as const,
+	content: `message-${index}`,
+	timestamp: index,
+}));
 const controller = createPerseusController({ model, safeTools: ["read"], minConfidence: 0.5 });
 const prediction = controller.beginTurn({
-	context: { systemPrompt: "", messages: [], tools: [] },
+	context: { systemPrompt: "actor-system-secret", messages: [], tools: [] },
 	actorModel: model,
 	thinkingLevel: "high",
-	convertToLlm: () => [],
-	streamFn: () => {
+	convertToLlm: () => convertedMessages,
+	streamFn: (_model, context) => {
+		observedContext = context;
 		timedStream = new TimedAssistantStream(firstLine, secondLine);
 		return timedStream;
 	},
@@ -99,6 +107,9 @@ assert.deepEqual(candidates, [
 	{ toolName: "read", arguments: { path: "/a" }, confidence: 0.9, rationale: undefined },
 	{ toolName: "read", arguments: { path: "/b" }, confidence: 0.8, rationale: undefined },
 ]);
+assert.equal(observedContext?.messages.length, 7, "six recent messages plus one prediction instruction are sent");
+assert.equal(observedContext?.messages[0]?.content, "message-2");
+assert.ok(!observedContext?.systemPrompt?.includes("actor-system-secret"));
 
 assert.deepEqual(
 	parseSpeculativeCandidates(JSON.stringify({

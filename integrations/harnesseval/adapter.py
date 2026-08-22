@@ -205,6 +205,7 @@ def run(request_path: Path) -> int:
             "cooldown_turns": int(environment.get("PERSEUS_SPECULATOR_COOLDOWN_TURNS", "4")),
             "max_tokens": int(environment.get("PERSEUS_SPECULATOR_MAX_TOKENS", "256")),
             "timeout_ms": int(environment.get("PERSEUS_SPECULATOR_TIMEOUT_MS", "5000")),
+            "context_messages": int(environment.get("PERSEUS_SPECULATOR_CONTEXT_MESSAGES", "6")),
             "safe_tools": safe_tools,
             "events": mechanism_counts,
             "metrics": speculation_metrics(trace),

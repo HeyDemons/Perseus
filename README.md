@@ -85,6 +85,10 @@ Each validated NDJSON row reaches the runtime immediately, so a high-confidence
 batch member can start before the Speculator finishes generating the remaining
 candidates. Promise-array controllers remain supported for extension
 compatibility.
+To keep prediction cheaper than Actor reasoning, the Speculator receives only
+the six most recent converted messages plus the tool catalog by default; it
+does not duplicate the full Actor system prompt. Override the message window
+with `PERSEUS_SPECULATOR_CONTEXT_MESSAGES`.
 
 ## Verify
 

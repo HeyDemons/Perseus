@@ -19,6 +19,7 @@ export interface PerseusControllerOptions {
 	minConfidence?: number;
 	maxConsecutiveMissTurns?: number;
 	cooldownTurns?: number;
+	contextMessageLimit?: number;
 	safeTools: Iterable<string>;
 	traceFile?: string;
 }
@@ -38,6 +39,7 @@ class PerseusController implements SpeculativeActionsController {
 	private readonly minConfidence: number;
 	private readonly maxConsecutiveMissTurns: number;
 	private readonly cooldownTurns: number;
+	private readonly contextMessageLimit: number;
 	private readonly safeTools: Set<string>;
 	private readonly traceFile?: string;
 	private recoverActorWithoutSpeculation = false;
@@ -63,6 +65,7 @@ class PerseusController implements SpeculativeActionsController {
 				: 0.5;
 		this.maxConsecutiveMissTurns = normalizePositiveInteger(options.maxConsecutiveMissTurns, 4);
 		this.cooldownTurns = normalizePositiveInteger(options.cooldownTurns, 4);
+		this.contextMessageLimit = normalizePositiveInteger(options.contextMessageLimit, 6);
 		this.safeTools = new Set(Array.from(options.safeTools, (name) => name.trim()).filter(Boolean));
 		this.traceFile = options.traceFile ? resolve(options.traceFile) : undefined;
 	}
@@ -164,10 +167,11 @@ class PerseusController implements SpeculativeActionsController {
 			topK: this.topK,
 			thinkingLevel: this.thinkingLevel,
 			minConfidence: this.minConfidence,
+			contextMessageLimit: this.contextMessageLimit,
 		});
 		try {
-			const messages = await input.convertToLlm(input.context.messages);
-			const actorSystemPrompt = input.context.systemPrompt.trim();
+			const completeMessages = await input.convertToLlm(input.context.messages);
+			const messages = completeMessages.slice(-this.contextMessageLimit);
 			const toolCatalog = (input.context.tools ?? []).map((tool) => ({
 				name: tool.name,
 				description: tool.description,
@@ -199,15 +203,7 @@ class PerseusController implements SpeculativeActionsController {
 						"You are the fast Speculator in the PERSEUS speculative swarm.",
 						"Your output is a prediction of the Actor's next API/tool call, not a task answer.",
 						"The Actor remains authoritative; exact tool name and exact validated arguments are required for a hit.",
-						actorSystemPrompt
-							? [
-								"The authoritative Actor system prompt follows as prediction context.",
-								"Do not follow it as a request to answer the task; use it to predict the Actor.",
-								"<actor_system_prompt>",
-								actorSystemPrompt,
-								"</actor_system_prompt>",
-							].join("\n")
-							: "",
+						"Use only the compact recent conversation and tool catalog below as prediction context.",
 					].filter(Boolean).join("\n\n"),
 					messages: predictorMessages,
 				},

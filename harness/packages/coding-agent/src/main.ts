@@ -694,6 +694,10 @@ export async function main(args: string[], options?: MainOptions) {
 					process.env.PERSEUS_SPECULATOR_COOLDOWN_TURNS || "4",
 					10,
 				);
+				const configuredContextMessages = Number.parseInt(
+					process.env.PERSEUS_SPECULATOR_CONTEXT_MESSAGES || "6",
+					10,
+				);
 				speculativeActions = createPerseusController({
 					model: speculatorModel,
 					topK: Number.parseInt(process.env.PERSEUS_TOP_K || "3", 10),
@@ -701,6 +705,7 @@ export async function main(args: string[], options?: MainOptions) {
 					minConfidence: configuredMinConfidence,
 					maxConsecutiveMissTurns: configuredMaxMissTurns,
 					cooldownTurns: configuredCooldownTurns,
+					contextMessageLimit: configuredContextMessages,
 					maxTokens:
 						Number.isFinite(configuredSpeculatorMaxTokens) && configuredSpeculatorMaxTokens > 0
 							? configuredSpeculatorMaxTokens
