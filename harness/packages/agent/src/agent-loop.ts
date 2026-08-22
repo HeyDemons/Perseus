@@ -612,6 +612,21 @@ class ActiveSpeculativeTurn {
 			});
 			return undefined;
 		}
+		const claimedAtMs = Date.now();
+		const execution = await entry.promise;
+		if (isRejectedSpeculativeExecution(execution.outcome)) {
+			this.entries.delete(key);
+			this.misses += 1;
+			this.controller.record({
+				event: "candidate_rejected",
+				requestIndex: this.requestIndex,
+				turnId: this.prediction.id,
+				toolName: prepared.toolCall.name,
+				arguments: asRecord(prepared.args),
+				reason: "speculative_executor_rejected",
+			});
+			return undefined;
+		}
 		entry.claimed = true;
 		this.hits += 1;
 		this.controller.record({
@@ -622,8 +637,6 @@ class ActiveSpeculativeTurn {
 			arguments: asRecord(prepared.args),
 			confidence: entry.candidate.confidence,
 		});
-		const claimedAtMs = Date.now();
-		const execution = await entry.promise;
 		const toolLatencyMs = Math.max(0, execution.completedAtMs - execution.startedAtMs);
 		const headStartMs = Math.max(0, claimedAtMs - execution.startedAtMs);
 		const savedMs = Math.min(toolLatencyMs, headStartMs);
@@ -896,6 +909,15 @@ class ActiveSpeculativeTurn {
 			.finally(() => this.parentSignal?.removeEventListener("abort", abortFromParent));
 		this.continuation = { contextKey, response, abortController, startedAtMs, claimed: false };
 	}
+}
+
+function isRejectedSpeculativeExecution(executed: ExecutedToolCallOutcome): boolean {
+	const details = executed.result.details;
+	return Boolean(
+		details &&
+		typeof details === "object" &&
+		(details as Record<string, unknown>).perseusSpeculationRejected === true,
+	);
 }
 
 async function* asCandidateStream(

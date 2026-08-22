@@ -88,7 +88,11 @@ function controller(
 	};
 }
 
-async function runScenario(predictedArgs: Record<string, unknown>, safe: boolean) {
+async function runScenario(
+	predictedArgs: Record<string, unknown>,
+	safe: boolean,
+	rejectSpeculation = false,
+) {
 	const events: SpeculativeActionTraceEvent[] = [];
 	const starts: number[] = [];
 	let actorResolvedAt = 0;
@@ -99,7 +103,7 @@ async function runScenario(predictedArgs: Record<string, unknown>, safe: boolean
 		label: "lookup",
 		description: "Read-only lookup",
 		parameters: toolSchema,
-		async execute(_id, params, signal) {
+		async execute(id, params, signal) {
 			executions += 1;
 			starts.push(Date.now());
 			await new Promise<void>((resolve, reject) => {
@@ -109,7 +113,12 @@ async function runScenario(predictedArgs: Record<string, unknown>, safe: boolean
 					reject(new Error("aborted"));
 				}, { once: true });
 			});
-			return { content: [{ type: "text", text: JSON.stringify(params) }], details: {} };
+			return {
+				content: [{ type: "text", text: JSON.stringify(params) }],
+				details: rejectSpeculation && id.startsWith("spec-")
+					? { perseusSpeculationRejected: true }
+					: {},
+			};
 		},
 	};
 	const context: AgentContext = { systemPrompt: "test", messages: [], tools: [tool] };
@@ -158,5 +167,10 @@ const unsafe = await runScenario({ a: 1, b: 2 }, false);
 assert.equal(unsafe.executions, 1, "unsafe speculation must never pre-execute");
 assert.ok(unsafe.starts[0] >= unsafe.actorResolvedAt);
 assert.equal(unsafe.events.filter((event) => event.event === "candidate_unsafe").length, 1);
+
+const rejected = await runScenario({ a: 1, b: 2 }, true, true);
+assert.equal(rejected.executions, 2, "a rejected snapshot must execute the Actor call normally");
+assert.equal(rejected.events.filter((event) => event.event === "candidate_rejected").length, 1);
+assert.equal(rejected.events.filter((event) => event.event === "cache_hit").length, 0);
 
 console.log("PERSEUS speculative swarm protocol tests passed");

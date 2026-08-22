@@ -149,12 +149,19 @@ export default function harnessevalToolBridge(api: any) {
 					});
 					const payload = response.payload;
 					const speculationId = payload?._harnesseval_speculation_id;
+					const speculationRejected = payload?._harnesseval_speculation_rejected === true;
 					const visiblePayload = { ...payload };
 					delete visiblePayload._harnesseval_speculation_id;
+					delete visiblePayload._harnesseval_speculation_rejected;
 					return {
 						content: toolResultContent(visiblePayload),
 						details:
-							typeof speculationId === "string"
+							speculationRejected
+								? {
+									perseusSpeculationRejected: true,
+									reason: typeof payload?.error === "string" ? payload.error : "snapshot_rejected",
+								}
+								: typeof speculationId === "string"
 								? {
 									harnessevalSpeculation: {
 										id: speculationId,
@@ -163,7 +170,7 @@ export default function harnessevalToolBridge(api: any) {
 									},
 								}
 								: {},
-						isError: !response.ok || payload?.ok === false,
+						isError: speculationRejected || !response.ok || payload?.ok === false,
 					};
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);

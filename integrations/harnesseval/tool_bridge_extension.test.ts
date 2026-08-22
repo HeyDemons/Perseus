@@ -114,7 +114,64 @@ async function testDeclarationOnlyLifecycle() {
 	}
 }
 
-Promise.all([testDirectPostBypassesProxyEnvironment(), testDeclarationOnlyLifecycle()])
+async function testRejectedSnapshotIsMarkedForActorFallback() {
+	const directory = mkdtempSync(join(tmpdir(), "harnesseval-speculation-rejected-"));
+	const manifestPath = join(directory, "manifest.json");
+	writeFileSync(
+		manifestPath,
+		JSON.stringify({
+			tools: [{ name: "run_command", parameters: { type: "object", properties: {} } }],
+		}),
+	);
+	const server = createServer((request, response) => {
+		request.resume();
+		request.on("end", () => {
+			response.writeHead(200, { "content-type": "application/json" });
+			response.end(JSON.stringify({
+				ok: false,
+				error: "snapshot_filesystem_changed",
+				_harnesseval_speculation_rejected: true,
+			}));
+		});
+	});
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const address = server.address();
+	if (address === null || typeof address === "string") throw new Error("missing test server port");
+	const previousManifest = process.env.HARNESSEVAL_TOOL_MANIFEST;
+	const previousEndpoint = process.env.HARNESSEVAL_TOOL_ENDPOINT;
+	try {
+		process.env.HARNESSEVAL_TOOL_MANIFEST = manifestPath;
+		process.env.HARNESSEVAL_TOOL_ENDPOINT = `http://127.0.0.1:${address.port}`;
+		const tools: any[] = [];
+		harnessevalToolBridge({
+			on() {},
+			registerTool(tool: any) {
+				tools.push(tool);
+			},
+		});
+		const result = await tools[0].execute("spec-turn-0", { argv: ["touch", "/app/x"] });
+		assert.equal(result.isError, true);
+		assert.deepEqual(result.details, {
+			perseusSpeculationRejected: true,
+			reason: "snapshot_filesystem_changed",
+		});
+		assert.equal(JSON.stringify(result.content).includes("_harnesseval_speculation_rejected"), false);
+	} finally {
+		if (previousManifest === undefined) delete process.env.HARNESSEVAL_TOOL_MANIFEST;
+		else process.env.HARNESSEVAL_TOOL_MANIFEST = previousManifest;
+		if (previousEndpoint === undefined) delete process.env.HARNESSEVAL_TOOL_ENDPOINT;
+		else process.env.HARNESSEVAL_TOOL_ENDPOINT = previousEndpoint;
+		await new Promise<void>((resolve, reject) =>
+			server.close((error) => (error ? reject(error) : resolve())),
+		);
+		rmSync(directory, { recursive: true, force: true });
+	}
+}
+
+Promise.resolve()
+	.then(testDirectPostBypassesProxyEnvironment)
+	.then(testDeclarationOnlyLifecycle)
+	.then(testRejectedSnapshotIsMarkedForActorFallback)
 	.then(() => console.log("HarnessEval tool bridge: OK"))
 	.catch((error) => {
 		console.error(error);

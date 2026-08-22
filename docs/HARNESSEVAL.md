@@ -109,6 +109,20 @@ In both paths, the command adapter must leave the benchmark prompt and native
 scorer unchanged. A benchmark-specific system prompt, answer-bearing cache, or
 replacement scorer invalidates architectural comparison.
 
+### Experimental Terminal Command Snapshots
+
+`HARNESSEVAL_ENABLE_SNAPSHOT_RUN_COMMAND_SPECULATION=1` opts Terminal-Bench
+into snapshot-isolated `run_command` speculation. The bridge commits the live
+task container to an ephemeral image, runs the predicted command in a
+network-disabled temporary container, and reuses the result only when the
+command exits successfully and `docker diff` reports no filesystem changes.
+Rejected snapshots are invisible to the Actor and fall back to the live task
+container. `TERMINAL_BENCH_SNAPSHOT_SPECULATION_TIMEOUT_S` defaults to 120s.
+
+This path is experimental and default-off. It proves filesystem isolation, not
+equivalence of process state, time, randomness, or external services, so it
+must be reported as a separate product configuration.
+
 ## Matched Evaluation
 
 For each case, run a paired block:
