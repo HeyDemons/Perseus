@@ -3,7 +3,26 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import harnessevalToolBridge, { postJsonDirect, toolResultContent } from "./tool_bridge_extension.ts";
+import harnessevalToolBridge, {
+	normalizeToolArguments,
+	postJsonDirect,
+	toolResultContent,
+} from "./tool_bridge_extension.ts";
+
+assert.deepEqual(
+	normalizeToolArguments("run_command", {
+		argv: ["python3", "scripts/baseline_packer.py"],
+		cwd: "/app/task_file/.",
+	}),
+	{
+		argv: ["python3", "/app/task_file/scripts/baseline_packer.py"],
+		cwd: "/app/task_file",
+	},
+);
+assert.deepEqual(
+	normalizeToolArguments("run_command", { argv: ["bash", "-lc", "echo unchanged"], cwd: "/app" }),
+	{ argv: ["bash", "-lc", "echo unchanged"], cwd: "/app" },
+);
 
 const content = toolResultContent({
 	ok: true,
