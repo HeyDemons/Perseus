@@ -233,6 +233,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 
 	/** Optional lossless next-action speculation around the serial Actor call. */
 	speculativeActions?: SpeculativeActionsController;
+	/** Project tool-use turns to canonical tool calls/results at the provider boundary. */
+	canonicalToolState?: boolean;
+	/** Optional speculative continuation depth. Depth two requires canonicalToolState. */
+	speculativeDepth?: 1 | 2;
+	/** Minimum candidate confidence allowed to start a depth-two Actor continuation. */
+	speculativeDepthMinConfidence?: number;
 
 	/**
 	 * Resolves an API key dynamically for each LLM call.

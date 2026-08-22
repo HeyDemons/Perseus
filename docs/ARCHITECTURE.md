@@ -25,6 +25,20 @@ starts two paths concurrently:
 This topology overlaps prediction, model latency, and safe tool latency without
 adding a manager barrier before the Actor can act.
 
+## Optional Depth-Two Continuation
+
+The default remains the strict single-step protocol above. With
+`PERSEUS_DEPTH2=1`, one high-confidence safe candidate may additionally seed a
+detached next-Actor request after its tool result resolves. Tool-use turns are
+projected to canonical calls/results for both the enabled arm and its matched
+control. The detached response is committed only if the actual next provider
+context has the exact same canonical key; otherwise it is aborted and the
+normal Actor request runs.
+
+Canonical projection omits non-tool text on tool-use turns. Consequently this
+mode is an explicit experimental variant, not a claim of byte-identical
+transcript semantics relative to the default loop.
+
 ## Why It Is A Swarm
 
 Each candidate is an independent, non-authoritative execution branch over one

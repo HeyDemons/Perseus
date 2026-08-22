@@ -45,6 +45,9 @@ API_ENV = (
     "PERSEUS_SPECULATOR_MAX_MISS_TURNS",
     "PERSEUS_SPECULATOR_COOLDOWN_TURNS",
     "PERSEUS_SPECULATOR_CONTEXT_MESSAGES",
+    "PERSEUS_DEPTH2",
+    "PERSEUS_CANONICAL_TOOL_STATE",
+    "PERSEUS_DEPTH2_MIN_CONFIDENCE",
     "PERSEUS_API_TIMEOUT_MS",
     "PERSEUS_API_MAX_RETRIES",
     "PERSEUS_API_MAX_RETRY_DELAY_MS",
@@ -613,6 +616,12 @@ def mechanism_counts(trace: list[dict[str, Any]]) -> dict[str, int]:
 
 def speculation_metrics(trace: list[dict[str, Any]]) -> dict[str, float | int]:
     savings = [row for row in trace if row.get("event") == "speculation_saved"]
+    continuation_savings = [
+        row for row in trace if row.get("event") == "continuation_saved"
+    ]
+    continuation_calls = [
+        row for row in trace if row.get("event") == "continuation_completed"
+    ]
 
     def total(field: str) -> float:
         return sum(
@@ -627,6 +636,18 @@ def speculation_metrics(trace: list[dict[str, Any]]) -> dict[str, float | int]:
         "tool_latency_ms_total": total("toolLatencyMs"),
         "head_start_ms_total": total("headStartMs"),
         "waited_ms_total": total("waitedMs"),
+        "continuation_calls": len(continuation_calls),
+        "continuation_hits": len(continuation_savings),
+        "continuation_saved_ms_total": sum(
+            float(row["savedMs"])
+            for row in continuation_savings
+            if isinstance(row.get("savedMs"), (int, float))
+        ),
+        "continuation_tokens_total": sum(
+            int((row.get("usage") or {}).get("totalTokens") or 0)
+            for row in continuation_calls
+            if isinstance(row.get("usage"), dict)
+        ),
     }
 
 
@@ -1257,6 +1278,11 @@ def run_mode(
                     "case_id": case_id,
                     "profile": mode,
                     "perseus_enabled": enabled,
+                    "speculative_depth": 2 if enabled and os.environ.get("PERSEUS_DEPTH2") == "1" else 1,
+                    "canonical_tool_state": (
+                        os.environ.get("PERSEUS_DEPTH2") == "1"
+                        or os.environ.get("PERSEUS_CANONICAL_TOOL_STATE") == "1"
+                    ),
                     "agent_execution_seconds": 0.0,
                     "returncode": 1,
                     "answer": "",
@@ -1557,6 +1583,11 @@ def run_mode(
             "case_id": case_id,
             "profile": mode,
             "perseus_enabled": enabled,
+            "speculative_depth": 2 if enabled and os.environ.get("PERSEUS_DEPTH2") == "1" else 1,
+            "canonical_tool_state": (
+                os.environ.get("PERSEUS_DEPTH2") == "1"
+                or os.environ.get("PERSEUS_CANONICAL_TOOL_STATE") == "1"
+            ),
             "agent_execution_seconds": agent_seconds,
             "returncode": returncode,
             "answer": answer,

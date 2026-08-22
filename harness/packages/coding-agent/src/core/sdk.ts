@@ -53,6 +53,11 @@ export interface CreateAgentSessionOptions {
 	thinkingLevel?: ThinkingLevel;
 	/** Optional lossless serial next-action predictor. */
 	speculativeActions?: SpeculativeActionsController;
+	/** Canonicalize tool-use history so depth-two branches can be validated exactly. */
+	canonicalToolState?: boolean;
+	/** Start one speculative Actor continuation after a high-confidence safe tool branch. */
+	speculativeDepth?: 1 | 2;
+	speculativeDepthMinConfidence?: number;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
 
@@ -394,6 +399,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			return runner.emitContext(messages);
 		},
 		speculativeActions: options.speculativeActions,
+		canonicalToolState: options.canonicalToolState,
+		speculativeDepth: options.speculativeDepth,
+		speculativeDepthMinConfidence: options.speculativeDepthMinConfidence,
 		steeringMode: settingsManager.getSteeringMode(),
 		followUpMode: settingsManager.getFollowUpMode(),
 		transport: settingsManager.getTransport(),

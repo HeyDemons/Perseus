@@ -38,6 +38,11 @@ class HarnessEvalRunnerTests(unittest.TestCase):
                 "headStartMs": 300,
                 "waitedMs": 0,
             },
+            {
+                "event": "continuation_completed",
+                "usage": {"totalTokens": 321},
+            },
+            {"event": "continuation_saved", "savedMs": 750},
         ]
         self.assertEqual(
             runner.speculation_metrics(trace),
@@ -47,6 +52,10 @@ class HarnessEvalRunnerTests(unittest.TestCase):
                 "tool_latency_ms_total": 270.5,
                 "head_start_ms_total": 380.0,
                 "waited_ms_total": 40.0,
+                "continuation_calls": 1,
+                "continuation_hits": 1,
+                "continuation_saved_ms_total": 750.0,
+                "continuation_tokens_total": 321,
             },
         )
 

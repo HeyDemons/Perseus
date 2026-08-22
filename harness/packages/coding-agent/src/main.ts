@@ -719,6 +719,11 @@ export async function main(args: string[], options?: MainOptions) {
 				});
 			}
 		}
+		const depthTwoEnabled = process.env.PERSEUS_DEPTH2 === "1";
+		const canonicalToolState = depthTwoEnabled || process.env.PERSEUS_CANONICAL_TOOL_STATE === "1";
+		const depthTwoMinConfidence = Number.parseFloat(
+			process.env.PERSEUS_DEPTH2_MIN_CONFIDENCE || "0.9",
+		);
 
 		const created = await createAgentSessionFromServices({
 			services,
@@ -727,6 +732,9 @@ export async function main(args: string[], options?: MainOptions) {
 			model: sessionOptions.model,
 			thinkingLevel: sessionOptions.thinkingLevel,
 			speculativeActions,
+			canonicalToolState,
+			speculativeDepth: depthTwoEnabled && speculativeActions ? 2 : 1,
+			speculativeDepthMinConfidence: depthTwoMinConfidence,
 			scopedModels: sessionOptions.scopedModels,
 			tools: sessionOptions.tools,
 			excludeTools: sessionOptions.excludeTools,

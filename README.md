@@ -90,6 +90,18 @@ the six most recent converted messages plus the tool catalog by default; it
 does not duplicate the full Actor system prompt. Override the message window
 with `PERSEUS_SPECULATOR_CONTEXT_MESSAGES`.
 
+An experimental depth-two variant is available behind `PERSEUS_DEPTH2=1`.
+It projects tool-use turns to canonical tool calls/results for both PERSEUS and
+its matched Actor-only control, prelaunches at most one high-confidence next
+Actor call, and commits it only when the projected provider context matches
+exactly. `PERSEUS_DEPTH2_MIN_CONFIDENCE` defaults to `0.9`.
+
+Depth two is deliberately opt-in: canonical projection removes non-tool text
+from tool-use turns at the provider boundary, so it is a distinct measured
+variant rather than the strict transcript-preserving PERSEUS configuration.
+Set `PERSEUS_CANONICAL_TOOL_STATE=1` without depth two to run its matched
+projection-only control.
+
 ## Verify
 
 ```bash
