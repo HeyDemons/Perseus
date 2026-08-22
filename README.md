@@ -71,7 +71,7 @@ Speculator inherits it unless `PERSEUS_SPECULATOR_USER_AGENT` is set.
 The Speculator uses the Actor endpoint by default. Configure the
 `PERSEUS_SPECULATOR_*` variables to use a faster compatible endpoint. Keep
 `PERSEUS_SAFE_TOOLS` limited to actions whose early execution is semantically
-safe, such as reads and searches. The Speculator defaults to `low` thinking,
+safe, such as reads and searches. The Speculator defaults to `off` thinking,
 admits candidates with confidence at least `0.5`, and opens a four-turn
 cooldown after four consecutive miss-only turns. Override these policies with
 `PERSEUS_SPECULATOR_THINKING`, `PERSEUS_SPECULATOR_MIN_CONFIDENCE`,

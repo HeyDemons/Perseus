@@ -199,7 +199,7 @@ def run(request_path: Path) -> int:
             ),
             "model": environment.get("PERSEUS_SPECULATOR_MODEL", environment.get("PERSEUS_ACTOR_MODEL", "")),
             "top_k": int(environment.get("PERSEUS_TOP_K", "3")),
-            "thinking": environment.get("PERSEUS_SPECULATOR_THINKING", "low"),
+            "thinking": environment.get("PERSEUS_SPECULATOR_THINKING", "off"),
             "min_confidence": float(environment.get("PERSEUS_SPECULATOR_MIN_CONFIDENCE", "0.5")),
             "max_miss_turns": int(environment.get("PERSEUS_SPECULATOR_MAX_MISS_TURNS", "4")),
             "cooldown_turns": int(environment.get("PERSEUS_SPECULATOR_COOLDOWN_TURNS", "4")),

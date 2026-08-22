@@ -56,7 +56,7 @@ class PerseusController implements SpeculativeActionsController {
 			typeof options.timeoutMs === "number" && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
 				? options.timeoutMs
 				: undefined;
-		this.thinkingLevel = options.thinkingLevel ?? "low";
+		this.thinkingLevel = options.thinkingLevel ?? "off";
 		this.minConfidence =
 			typeof options.minConfidence === "number" && Number.isFinite(options.minConfidence)
 				? Math.max(0, Math.min(1, options.minConfidence))

@@ -665,10 +665,10 @@ export async function main(args: string[], options?: MainOptions) {
 					message: "PERSEUS has no benchmark-declared safe tools; this task will run on the Actor-only path",
 				});
 			} else {
-				const speculatorThinkingRaw = process.env.PERSEUS_SPECULATOR_THINKING?.trim() || "low";
+				const speculatorThinkingRaw = process.env.PERSEUS_SPECULATOR_THINKING?.trim() || "off";
 				const speculatorThinking = isValidThinkingLevel(speculatorThinkingRaw)
 					? speculatorThinkingRaw
-					: "low";
+					: "off";
 				if (!isValidThinkingLevel(speculatorThinkingRaw)) {
 					diagnostics.push({
 						type: "error",
