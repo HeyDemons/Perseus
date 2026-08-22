@@ -7,7 +7,6 @@ import {
 	type AssistantMessage,
 	type Context,
 	EventStream,
-	type Model,
 	streamSimple,
 	type ToolResultMessage,
 	validateToolArguments,
@@ -167,10 +166,6 @@ async function runLoop(
 	let config = initialConfig;
 	let firstTurn = true;
 	let requestIndex = 0;
-	let prefetchedResponse: Promise<AssistantMessage | undefined> | undefined;
-	let verificationPasses = 0;
-	let verificationActive = false;
-	let hasExecutedTools = false;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
@@ -197,23 +192,15 @@ async function runLoop(
 				pendingMessages = [];
 			}
 
-			// Stream assistant response, or consume an already-running depth-two Actor call.
-			let streamed: StreamedAssistantResponse;
-			const prefetched = prefetchedResponse ? await prefetchedResponse : undefined;
-			prefetchedResponse = undefined;
-			if (prefetched) {
-				requestIndex += 1;
-				streamed = await emitPrefetchedAssistantResponse(currentContext, prefetched, emit);
-			} else {
-				streamed = await streamAssistantResponse(
-					currentContext,
-					config,
-					signal,
-					emit,
-					streamFn,
-					requestIndex++,
-				);
-			}
+			// Stream assistant response
+			const streamed = await streamAssistantResponse(
+				currentContext,
+				config,
+				signal,
+				emit,
+				streamFn,
+				requestIndex++,
+			);
 			const message = streamed.message;
 			newMessages.push(message);
 
@@ -241,7 +228,6 @@ async function runLoop(
 					streamed.speculativeTurn,
 				);
 				toolResults.push(...executedToolBatch.messages);
-				hasExecutedTools = hasExecutedTools || executedToolBatch.messages.length > 0;
 				hasMoreToolCalls = !executedToolBatch.terminate;
 
 				for (const result of toolResults) {
@@ -249,6 +235,8 @@ async function runLoop(
 					newMessages.push(result);
 				}
 			}
+			streamed.speculativeTurn?.close();
+
 			await emit({ type: "turn_end", message, toolResults });
 
 			const nextTurnContext = {
@@ -272,59 +260,19 @@ async function runLoop(
 				};
 			}
 
-			const shouldStop = await config.shouldStopAfterTurn?.({
+			if (
+				await config.shouldStopAfterTurn?.({
 					message,
 					toolResults,
 					context: currentContext,
 					newMessages,
-				});
-
-			pendingMessages = (await config.getSteeringMessages?.()) || [];
-			if (
-				!shouldStop &&
-				message.stopReason === "stop" &&
-				toolCalls.length === 0 &&
-				verificationActive
+				})
 			) {
-				verificationActive = false;
-				config.speculativeActions?.record({
-					event: "critic_completed",
-					requestIndex: requestIndex - 1,
-					pass: verificationPasses,
-				});
-			}
-			if (
-				!shouldStop &&
-				message.stopReason === "stop" &&
-				toolCalls.length === 0 &&
-				hasExecutedTools &&
-				pendingMessages.length === 0 &&
-				config.verificationCritic &&
-				verificationPasses < config.verificationCritic.maxPasses
-			) {
-				verificationPasses += 1;
-				verificationActive = true;
-				pendingMessages = [{
-					role: "user",
-					content: config.verificationCritic.prompt,
-					timestamp: Date.now(),
-				}];
-				config.speculativeActions?.record({
-					event: "critic_requested",
-					requestIndex: requestIndex - 1,
-					pass: verificationPasses,
-				});
-			}
-			if (!shouldStop && hasMoreToolCalls && pendingMessages.length === 0) {
-				const claimed = await streamed.speculativeTurn?.claimContinuation(currentContext, config);
-				prefetchedResponse = claimed?.response;
-			}
-			streamed.speculativeTurn?.close();
-
-			if (shouldStop) {
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
 			}
+
+			pendingMessages = (await config.getSteeringMessages?.()) || [];
 		}
 
 		// Agent would stop here. Check for follow-up messages.
@@ -354,8 +302,21 @@ async function streamAssistantResponse(
 	streamFn?: StreamFn,
 	requestIndex = 0,
 ): Promise<StreamedAssistantResponse> {
-	const preparedRequest = await prepareAssistantRequest(context, config, signal);
-	const { messages, llmContext } = preparedRequest;
+	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
+	let messages = context.messages;
+	if (config.transformContext) {
+		messages = await config.transformContext(messages, signal);
+	}
+
+	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
+	const llmMessages = await config.convertToLlm(messages);
+
+	// Build LLM context
+	const llmContext: Context = {
+		systemPrompt: context.systemPrompt,
+		messages: llmMessages,
+		tools: context.tools,
+	};
 
 	const streamFunction = streamFn || streamSimple;
 	const speculativeContext = messages === context.messages ? context : { ...context, messages };
@@ -431,121 +392,16 @@ async function streamAssistantResponse(
 	return { message: finalMessage, speculativeTurn };
 }
 
-type PreparedAssistantRequest = {
-	messages: AgentMessage[];
-	llmContext: Context;
-	contextKey: string;
-};
-
-async function prepareAssistantRequest(
-	context: AgentContext,
-	config: AgentLoopConfig,
-	signal?: AbortSignal,
-): Promise<PreparedAssistantRequest> {
-	let messages = context.messages;
-	if (config.transformContext) messages = await config.transformContext(messages, signal);
-	if (config.canonicalToolState) messages = canonicalizeToolState(messages);
-	const llmMessages = await config.convertToLlm(messages);
-	const llmContext: Context = {
-		systemPrompt: context.systemPrompt,
-		messages: llmMessages,
-		tools: context.tools,
-	};
-	return {
-		messages,
-		llmContext,
-		contextKey: stableJson({
-			model: `${config.model.provider}/${config.model.id}/${config.model.api}`,
-			reasoning: config.reasoning ?? "off",
-			systemPrompt: llmContext.systemPrompt ?? "",
-			messages: llmContext.messages.map(providerMessageProjection),
-			tools: (llmContext.tools ?? []).map((tool) => ({
-				name: tool.name,
-				description: tool.description,
-				parameters: tool.parameters,
-			})),
-		}),
-	};
-}
-
-function providerMessageProjection(message: Context["messages"][number]): unknown {
-	if (message.role === "assistant") {
-		return { role: message.role, content: message.content };
-	}
-	if (message.role === "toolResult") {
-		return {
-			role: message.role,
-			toolCallId: message.toolCallId,
-			toolName: message.toolName,
-			content: message.content,
-			isError: message.isError,
-		};
-	}
-	return { role: message.role, content: message.content };
-}
-
-export function canonicalizeToolState(messages: AgentMessage[]): AgentMessage[] {
-	let toolBatch = 0;
-	const canonicalIds = new Map<string, string>();
-	return messages.map((message) => {
-		if (message.role === "assistant") {
-			const toolCalls = message.content.filter((item) => item.type === "toolCall");
-			if (toolCalls.length === 0) return message;
-			const content = toolCalls.map((toolCall, index) => {
-				const id = `perseus-tool-${toolBatch}-${index}`;
-				canonicalIds.set(toolCall.id, id);
-				return { ...toolCall, id };
-			});
-			toolBatch += 1;
-			return { ...message, content };
-		}
-		if (message.role === "toolResult") {
-			const toolCallId = canonicalIds.get(message.toolCallId);
-			return toolCallId ? { ...message, toolCallId } : message;
-		}
-		return message;
-	});
-}
-
 type StreamedAssistantResponse = {
 	message: AssistantMessage;
 	speculativeTurn?: ActiveSpeculativeTurn;
 };
 
-async function emitPrefetchedAssistantResponse(
-	context: AgentContext,
-	message: AssistantMessage,
-	emit: AgentEventSink,
-): Promise<StreamedAssistantResponse> {
-	context.messages.push(message);
-	await emit({ type: "message_start", message: { ...message } });
-	await emit({ type: "message_end", message });
-	return { message };
-}
-
 type SpeculativeFutureEntry = {
 	candidate: SpeculativeActionCandidate;
 	abortController: AbortController;
-	promise: Promise<SpeculativeExecutedToolCall>;
+	promise: Promise<ExecutedToolCallOutcome>;
 	claimed: boolean;
-};
-
-type SpeculativeExecutedToolCall = {
-	outcome: ExecutedToolCallOutcome;
-	startedAtMs: number;
-	completedAtMs: number;
-};
-
-type SpeculativeContinuationEntry = {
-	contextKey: Promise<string>;
-	response: Promise<AssistantMessage | undefined>;
-	abortController: AbortController;
-	startedAtMs: number;
-	claimed: boolean;
-};
-
-type ClaimedSpeculativeContinuation = {
-	response: Promise<AssistantMessage | undefined>;
 };
 
 function startSpeculativeTurn(
@@ -568,7 +424,7 @@ function startSpeculativeTurn(
 			requestIndex,
 		});
 		return prediction
-			? new ActiveSpeculativeTurn(context, config, streamFn, controller, prediction, signal, requestIndex)
+			? new ActiveSpeculativeTurn(context, controller, prediction, signal, requestIndex)
 			: undefined;
 	} catch (error) {
 		controller.record({
@@ -582,8 +438,6 @@ function startSpeculativeTurn(
 
 class ActiveSpeculativeTurn {
 	private readonly context: AgentContext;
-	private readonly config: AgentLoopConfig;
-	private readonly streamFn: StreamFn;
 	private readonly controller: NonNullable<AgentLoopConfig["speculativeActions"]>;
 	private readonly prediction: SpeculativeActionsPrediction;
 	private readonly parentSignal: AbortSignal | undefined;
@@ -594,24 +448,15 @@ class ActiveSpeculativeTurn {
 	private closed = false;
 	private hits = 0;
 	private misses = 0;
-	private continuation?: SpeculativeContinuationEntry;
 
 	constructor(
 		context: AgentContext,
-		config: AgentLoopConfig,
-		streamFn: StreamFn,
 		controller: NonNullable<AgentLoopConfig["speculativeActions"]>,
 		prediction: SpeculativeActionsPrediction,
 		parentSignal: AbortSignal | undefined,
 		requestIndex: number,
 	) {
-		this.context = {
-			...context,
-			messages: [...context.messages],
-			tools: context.tools ? [...context.tools] : undefined,
-		};
-		this.config = config;
-		this.streamFn = streamFn;
+		this.context = context;
 		this.controller = controller;
 		this.prediction = prediction;
 		this.parentSignal = parentSignal;
@@ -651,21 +496,6 @@ class ActiveSpeculativeTurn {
 			});
 			return undefined;
 		}
-		const claimedAtMs = Date.now();
-		const execution = await entry.promise;
-		if (isRejectedSpeculativeExecution(execution.outcome)) {
-			this.entries.delete(key);
-			this.misses += 1;
-			this.controller.record({
-				event: "candidate_rejected",
-				requestIndex: this.requestIndex,
-				turnId: this.prediction.id,
-				toolName: prepared.toolCall.name,
-				arguments: asRecord(prepared.args),
-				reason: "speculative_executor_rejected",
-			});
-			return undefined;
-		}
 		entry.claimed = true;
 		this.hits += 1;
 		this.controller.record({
@@ -676,70 +506,7 @@ class ActiveSpeculativeTurn {
 			arguments: asRecord(prepared.args),
 			confidence: entry.candidate.confidence,
 		});
-		const toolLatencyMs = Math.max(0, execution.completedAtMs - execution.startedAtMs);
-		const headStartMs = Math.max(0, claimedAtMs - execution.startedAtMs);
-		const savedMs = Math.min(toolLatencyMs, headStartMs);
-		this.controller.record({
-			event: "speculation_saved",
-			requestIndex: this.requestIndex,
-			turnId: this.prediction.id,
-			toolName: prepared.toolCall.name,
-			arguments: asRecord(prepared.args),
-			confidence: entry.candidate.confidence,
-			savedMs,
-			toolLatencyMs,
-			headStartMs,
-			waitedMs: Math.max(0, execution.completedAtMs - claimedAtMs),
-		});
-		return execution.outcome;
-	}
-
-	async claimContinuation(
-		actualContext: AgentContext,
-		actualConfig: AgentLoopConfig,
-	): Promise<ClaimedSpeculativeContinuation | undefined> {
-		const entry = this.continuation;
-		if (!entry || entry.claimed) return undefined;
-		const [predictedKey, actualRequest] = await Promise.all([
-			entry.contextKey,
-			prepareAssistantRequest(actualContext, actualConfig, this.parentSignal),
-		]);
-		if (!predictedKey || predictedKey !== actualRequest.contextKey) {
-			entry.abortController.abort();
-			this.controller.record({
-				event: "continuation_miss",
-				requestIndex: this.requestIndex,
-				turnId: this.prediction.id,
-				reason: "provider_context_mismatch",
-			});
-			return undefined;
-		}
-		entry.claimed = true;
-		const claimedAtMs = Date.now();
-		this.controller.record({
-			event: "continuation_hit",
-			requestIndex: this.requestIndex,
-			turnId: this.prediction.id,
-			headStartMs: Math.max(0, claimedAtMs - entry.startedAtMs),
-		});
-		return {
-			response: entry.response.then((message) => {
-				if (!message) return undefined;
-				const completedAtMs = Date.now();
-				const actorLatencyMs = Math.max(0, completedAtMs - entry.startedAtMs);
-				const headStartMs = Math.max(0, claimedAtMs - entry.startedAtMs);
-				this.controller.record({
-					event: "continuation_saved",
-					requestIndex: this.requestIndex,
-					turnId: this.prediction.id,
-					savedMs: Math.min(actorLatencyMs, headStartMs),
-					actorLatencyMs,
-					headStartMs,
-					waitedMs: Math.max(0, completedAtMs - claimedAtMs),
-				});
-				return message;
-			}),
-		};
+		return await entry.promise;
 	}
 
 	close(): void {
@@ -759,14 +526,6 @@ class ActiveSpeculativeTurn {
 				arguments: entry.candidate.arguments,
 			});
 		}
-		if (this.continuation && !this.continuation.claimed) {
-			this.continuation.abortController.abort();
-			this.controller.record({
-				event: "continuation_discarded",
-				requestIndex: this.requestIndex,
-				turnId: this.prediction.id,
-			});
-		}
 		this.controller.record({
 			event: "turn_closed",
 			requestIndex: this.requestIndex,
@@ -780,25 +539,9 @@ class ActiveSpeculativeTurn {
 	}
 
 	private async launchCandidates(): Promise<void> {
-		let received = 0;
-		let lateRecorded = false;
+		let candidates: SpeculativeActionCandidate[];
 		try {
-			for await (const candidate of asCandidateStream(this.prediction.candidates)) {
-				received += 1;
-				if (this.actorDone || this.closed || this.parentSignal?.aborted) {
-					if (!lateRecorded) {
-						lateRecorded = true;
-						this.controller.record({
-							event: "prediction_late",
-							requestIndex: this.requestIndex,
-							turnId: this.prediction.id,
-							candidateCount: received,
-						});
-					}
-					continue;
-				}
-				this.launchCandidate(candidate, received - 1);
-			}
+			candidates = await this.prediction.candidates;
 		} catch (error) {
 			this.controller.record({
 				event: "prediction_error",
@@ -808,165 +551,70 @@ class ActiveSpeculativeTurn {
 			});
 			return;
 		}
-		if (received === 0 && !lateRecorded && (this.actorDone || this.closed || this.parentSignal?.aborted)) {
+		if (this.actorDone || this.closed || this.parentSignal?.aborted) {
 			this.controller.record({
 				event: "prediction_late",
 				requestIndex: this.requestIndex,
 				turnId: this.prediction.id,
-				candidateCount: 0,
+				candidateCount: candidates.length,
 			});
+			return;
 		}
-	}
 
-	private launchCandidate(candidate: SpeculativeActionCandidate, index: number): void {
-		if (!this.controller.isSafeTool(candidate.toolName)) {
-			this.controller.record({
-				event: "candidate_unsafe",
-				requestIndex: this.requestIndex,
-				turnId: this.prediction.id,
-				toolName: candidate.toolName,
-				arguments: candidate.arguments,
-			});
-			return;
-		}
-		const prepared = prepareSpeculativeCandidate(this.context, candidate, this.prediction.id, index);
-		if (!prepared) {
-			this.controller.record({
-				event: "candidate_invalid",
-				requestIndex: this.requestIndex,
-				turnId: this.prediction.id,
-				toolName: candidate.toolName,
-				arguments: candidate.arguments,
-			});
-			return;
-		}
-		const key = exactToolCallKey(prepared.toolCall.name, prepared.args);
-		if (this.entries.has(key)) return;
-		const abortController = new AbortController();
-		const abort = () => abortController.abort();
-		this.parentSignal?.addEventListener("abort", abort, { once: true });
-		const startedAtMs = Date.now();
-		const promise = executePreparedToolCall(prepared, abortController.signal, async () => undefined).then((result) => {
-			const completedAtMs = Date.now();
-			this.parentSignal?.removeEventListener("abort", abort);
-			this.controller.record({
-				event: "candidate_completed",
-				requestIndex: this.requestIndex,
-				turnId: this.prediction.id,
-				toolName: candidate.toolName,
-				arguments: asRecord(prepared.args),
-				isError: result.isError,
-				latencyMs: completedAtMs - startedAtMs,
-			});
-			const execution = { outcome: result, startedAtMs, completedAtMs };
-			this.maybeStartContinuation(candidate, prepared, execution);
-			return execution;
-		});
-		this.entries.set(key, { candidate, abortController, promise, claimed: false });
-		this.controller.record({
-			event: "candidate_prelaunched",
-			requestIndex: this.requestIndex,
-			turnId: this.prediction.id,
-			toolName: candidate.toolName,
-			arguments: asRecord(prepared.args),
-			confidence: candidate.confidence,
-		});
-	}
-
-	private maybeStartContinuation(
-		candidate: SpeculativeActionCandidate,
-		prepared: PreparedToolCall,
-		execution: SpeculativeExecutedToolCall,
-	): void {
-		if (
-			this.config.speculativeDepth !== 2 ||
-			!this.config.canonicalToolState ||
-			this.continuation ||
-			(candidate.confidence ?? 0) < (this.config.speculativeDepthMinConfidence ?? 0.9) ||
-			execution.outcome.isError
-		) {
-			return;
-		}
-		const predictedAssistant = syntheticToolAssistant(this.config.model, prepared.toolCall);
-		const predictedResult = createToolResultMessage({
-			toolCall: prepared.toolCall,
-			result: execution.outcome.result,
-			isError: execution.outcome.isError,
-		});
-		const predictedContext: AgentContext = {
-			...this.context,
-			messages: [...this.context.messages, predictedAssistant, predictedResult],
-		};
-		const abortController = new AbortController();
-		const abortFromParent = () => abortController.abort();
-		this.parentSignal?.addEventListener("abort", abortFromParent, { once: true });
-		const startedAtMs = Date.now();
-		const preparedRequest = prepareAssistantRequest(predictedContext, this.config, abortController.signal);
-		const contextKey = preparedRequest.then((request) => request.contextKey, () => "");
-		const response = preparedRequest
-			.then(async ({ llmContext }) => {
+		for (let index = 0; index < candidates.length; index += 1) {
+			if (this.actorDone || this.closed || this.parentSignal?.aborted) break;
+			const candidate = candidates[index];
+			if (!this.controller.isSafeTool(candidate.toolName)) {
 				this.controller.record({
-					event: "continuation_prelaunched",
+					event: "candidate_unsafe",
 					requestIndex: this.requestIndex,
 					turnId: this.prediction.id,
 					toolName: candidate.toolName,
 					arguments: candidate.arguments,
-					confidence: candidate.confidence,
 				});
-				const resolvedApiKey =
-					(this.config.getApiKey
-						? await this.config.getApiKey(this.config.model.provider)
-						: undefined) || this.config.apiKey;
-				const stream = await this.streamFn(this.config.model, llmContext, {
-					...this.config,
-					apiKey: resolvedApiKey,
-					signal: abortController.signal,
-				});
-				for await (const _event of stream) {
-					// Buffer the detached authoritative Actor response until the branch validates.
-				}
-				const message = await stream.result();
+				continue;
+			}
+			const prepared = prepareSpeculativeCandidate(this.context, candidate, this.prediction.id, index);
+			if (!prepared) {
 				this.controller.record({
-					event: "continuation_completed",
+					event: "candidate_invalid",
 					requestIndex: this.requestIndex,
 					turnId: this.prediction.id,
-					latencyMs: Date.now() - startedAtMs,
-					stopReason: message.stopReason,
-					usage: message.usage,
+					toolName: candidate.toolName,
+					arguments: candidate.arguments,
 				});
-				return message.stopReason === "error" || message.stopReason === "aborted" ? undefined : message;
-			})
-			.catch((error) => {
+				continue;
+			}
+			const key = exactToolCallKey(prepared.toolCall.name, prepared.args);
+			if (this.entries.has(key)) continue;
+			const abortController = new AbortController();
+			const abort = () => abortController.abort();
+			this.parentSignal?.addEventListener("abort", abort, { once: true });
+			const started = Date.now();
+			const promise = executePreparedToolCall(prepared, abortController.signal, async () => undefined).then((result) => {
+				this.parentSignal?.removeEventListener("abort", abort);
 				this.controller.record({
-					event: "continuation_failed",
+					event: "candidate_completed",
 					requestIndex: this.requestIndex,
 					turnId: this.prediction.id,
-					error: error instanceof Error ? error.message : String(error),
+					toolName: candidate.toolName,
+					arguments: asRecord(prepared.args),
+					isError: result.isError,
+					latencyMs: Date.now() - started,
 				});
-				return undefined;
-			})
-			.finally(() => this.parentSignal?.removeEventListener("abort", abortFromParent));
-		this.continuation = { contextKey, response, abortController, startedAtMs, claimed: false };
+				return result;
+			});
+			this.entries.set(key, { candidate, abortController, promise, claimed: false });
+			this.controller.record({
+				event: "candidate_prelaunched",
+				requestIndex: this.requestIndex,
+				turnId: this.prediction.id,
+				toolName: candidate.toolName,
+				arguments: asRecord(prepared.args),
+				confidence: candidate.confidence,
+			});
+		}
 	}
-}
-
-function isRejectedSpeculativeExecution(executed: ExecutedToolCallOutcome): boolean {
-	const details = executed.result.details;
-	return Boolean(
-		details &&
-		typeof details === "object" &&
-		(details as Record<string, unknown>).perseusSpeculationRejected === true,
-	);
-}
-
-async function* asCandidateStream(
-	source: SpeculativeActionsPrediction["candidates"],
-): AsyncGenerator<SpeculativeActionCandidate> {
-	if (Symbol.asyncIterator in Object(source)) {
-		for await (const candidate of source as AsyncIterable<SpeculativeActionCandidate>) yield candidate;
-		return;
-	}
-	for (const candidate of await (source as Promise<SpeculativeActionCandidate[]>)) yield candidate;
 }
 
 function prepareSpeculativeCandidate(
@@ -1385,26 +1033,6 @@ function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResul
 		content: finalized.result.content,
 		details: finalized.result.details,
 		isError: finalized.isError,
-		timestamp: Date.now(),
-	};
-}
-
-function syntheticToolAssistant(model: Model<any>, toolCall: AgentToolCall): AssistantMessage {
-	return {
-		role: "assistant",
-		content: [toolCall],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "toolUse",
 		timestamp: Date.now(),
 	};
 }

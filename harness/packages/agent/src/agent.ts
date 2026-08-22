@@ -99,10 +99,6 @@ export interface AgentOptions {
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	speculativeActions?: SpeculativeActionsController;
-	canonicalToolState?: boolean;
-	speculativeDepth?: 1 | 2;
-	speculativeDepthMinConfidence?: number;
-	verificationCritic?: AgentLoopConfig["verificationCritic"];
 	streamFn?: StreamFn;
 	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	onPayload?: SimpleStreamOptions["onPayload"];
@@ -178,10 +174,6 @@ export class Agent {
 	public convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	public transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	public speculativeActions?: SpeculativeActionsController;
-	public canonicalToolState: boolean;
-	public speculativeDepth: 1 | 2;
-	public speculativeDepthMinConfidence: number;
-	public verificationCritic?: AgentLoopConfig["verificationCritic"];
 	public streamFn: StreamFn;
 	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 	public onPayload?: SimpleStreamOptions["onPayload"];
@@ -214,14 +206,6 @@ export class Agent {
 		this.convertToLlm = options.convertToLlm ?? defaultConvertToLlm;
 		this.transformContext = options.transformContext;
 		this.speculativeActions = options.speculativeActions;
-		this.canonicalToolState = options.canonicalToolState === true;
-		this.speculativeDepth = options.speculativeDepth === 2 ? 2 : 1;
-		this.speculativeDepthMinConfidence =
-			typeof options.speculativeDepthMinConfidence === "number" &&
-			Number.isFinite(options.speculativeDepthMinConfidence)
-				? Math.max(0, Math.min(1, options.speculativeDepthMinConfidence))
-				: 0.9;
-		this.verificationCritic = options.verificationCritic;
 		this.streamFn = options.streamFn ?? streamSimple;
 		this.getApiKey = options.getApiKey;
 		this.onPayload = options.onPayload;
@@ -457,10 +441,6 @@ export class Agent {
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
 			speculativeActions: this.speculativeActions,
-			canonicalToolState: this.canonicalToolState,
-			speculativeDepth: this.speculativeDepth,
-			speculativeDepthMinConfidence: this.speculativeDepthMinConfidence,
-			verificationCritic: this.verificationCritic,
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
 				if (skipInitialSteeringPoll) {

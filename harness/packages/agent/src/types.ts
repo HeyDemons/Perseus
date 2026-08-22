@@ -152,11 +152,7 @@ export interface SpeculativeActionsBeginContext {
 /** A prediction request starts immediately and resolves without blocking the Actor. */
 export interface SpeculativeActionsPrediction {
 	id: string;
-	/**
-	 * Controllers may stream candidates as soon as each one is validated. Promise arrays
-	 * remain supported for compatibility with simple policies and existing extensions.
-	 */
-	candidates: Promise<SpeculativeActionCandidate[]> | AsyncIterable<SpeculativeActionCandidate>;
+	candidates: Promise<SpeculativeActionCandidate[]>;
 	cancel?: () => void;
 }
 
@@ -233,17 +229,6 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 
 	/** Optional lossless next-action speculation around the serial Actor call. */
 	speculativeActions?: SpeculativeActionsController;
-	/** Project tool-use turns to canonical tool calls/results at the provider boundary. */
-	canonicalToolState?: boolean;
-	/** Optional speculative continuation depth. Depth two requires canonicalToolState. */
-	speculativeDepth?: 1 | 2;
-	/** Minimum candidate confidence allowed to start a depth-two Actor continuation. */
-	speculativeDepthMinConfidence?: number;
-	/** Optional, explicitly lossy verification pass before accepting a tool-using run's final answer. */
-	verificationCritic?: {
-		maxPasses: number;
-		prompt: string;
-	};
 
 	/**
 	 * Resolves an API key dynamically for each LLM call.

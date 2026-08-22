@@ -37,19 +37,9 @@ API_ENV = (
     "PERSEUS_SPECULATOR_API_TYPE",
     "PERSEUS_SPECULATOR_API_KEY",
     "PERSEUS_SPECULATOR_USER_AGENT",
-    "PERSEUS_SPECULATOR_THINKING",
     "PERSEUS_TOP_K",
     "PERSEUS_SPECULATOR_MAX_TOKENS",
     "PERSEUS_SPECULATOR_TIMEOUT_MS",
-    "PERSEUS_SPECULATOR_MIN_CONFIDENCE",
-    "PERSEUS_SPECULATOR_MAX_MISS_TURNS",
-    "PERSEUS_SPECULATOR_COOLDOWN_TURNS",
-    "PERSEUS_SPECULATOR_CONTEXT_MESSAGES",
-    "PERSEUS_DEPTH2",
-    "PERSEUS_CANONICAL_TOOL_STATE",
-    "PERSEUS_DEPTH2_MIN_CONFIDENCE",
-    "HARNESSEVAL_ENABLE_SNAPSHOT_RUN_COMMAND_SPECULATION",
-    "TERMINAL_BENCH_SNAPSHOT_SPECULATION_TIMEOUT_S",
     "PERSEUS_API_TIMEOUT_MS",
     "PERSEUS_API_MAX_RETRIES",
     "PERSEUS_API_MAX_RETRY_DELAY_MS",
@@ -616,43 +606,6 @@ def mechanism_counts(trace: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
-def speculation_metrics(trace: list[dict[str, Any]]) -> dict[str, float | int]:
-    savings = [row for row in trace if row.get("event") == "speculation_saved"]
-    continuation_savings = [
-        row for row in trace if row.get("event") == "continuation_saved"
-    ]
-    continuation_calls = [
-        row for row in trace if row.get("event") == "continuation_completed"
-    ]
-
-    def total(field: str) -> float:
-        return sum(
-            float(row[field])
-            for row in savings
-            if isinstance(row.get(field), (int, float))
-        )
-
-    return {
-        "resolved_hits": len(savings),
-        "saved_ms_total": total("savedMs"),
-        "tool_latency_ms_total": total("toolLatencyMs"),
-        "head_start_ms_total": total("headStartMs"),
-        "waited_ms_total": total("waitedMs"),
-        "continuation_calls": len(continuation_calls),
-        "continuation_hits": len(continuation_savings),
-        "continuation_saved_ms_total": sum(
-            float(row["savedMs"])
-            for row in continuation_savings
-            if isinstance(row.get("savedMs"), (int, float))
-        ),
-        "continuation_tokens_total": sum(
-            int((row.get("usage") or {}).get("totalTokens") or 0)
-            for row in continuation_calls
-            if isinstance(row.get("usage"), dict)
-        ),
-    }
-
-
 def score_result(benchmark_id: str, prepared: Path | None, result: dict[str, Any]) -> dict[str, Any]:
     if benchmark_id in NATIVE_EPISODE_BENCHMARKS | TASK_BENCHMARKS:
         if result.get("failure_kind") == "tool_bridge_infrastructure":
@@ -1172,7 +1125,6 @@ def run_mode(
     image: str,
     extension: Path,
     enabled: bool,
-    critic: bool = False,
 ) -> dict[str, Any]:
     total_arm_timeout_sec = arm_timeout_sec()
     arm_deadline = (
@@ -1181,7 +1133,7 @@ def run_mode(
         else None
     )
     verifier_reserve_sec = terminal_verifier_reserve_sec(total_arm_timeout_sec)
-    mode = "perseus-critic" if critic else ("perseus" if enabled else "actor-only")
+    mode = "perseus" if enabled else "actor-only"
     mode_root = (
         run_dir / benchmark.id / case_id.replace("/", "_").replace(":", "_") / mode
     )
@@ -1281,12 +1233,6 @@ def run_mode(
                     "case_id": case_id,
                     "profile": mode,
                     "perseus_enabled": enabled,
-                    "verification_critic": critic,
-                    "speculative_depth": 2 if enabled and os.environ.get("PERSEUS_DEPTH2") == "1" else 1,
-                    "canonical_tool_state": (
-                        os.environ.get("PERSEUS_DEPTH2") == "1"
-                        or os.environ.get("PERSEUS_CANONICAL_TOOL_STATE") == "1"
-                    ),
                     "agent_execution_seconds": 0.0,
                     "returncode": 1,
                     "answer": "",
@@ -1381,10 +1327,6 @@ def run_mode(
                 "HOME=/tmp",
                 "-e",
                 f"PERSEUS_ENABLED={1 if enabled else 0}",
-                "-e",
-                f"PERSEUS_CRITIC={1 if critic else 0}",
-                "-e",
-                f"PERSEUS_CRITIC_MAX_PASSES={max(1, int(os.environ.get('PERSEUS_CRITIC_MAX_PASSES', '1')))}",
                 "-e",
                 f"PERSEUS_SAFE_TOOLS={','.join(safe_tools)}",
                 "-e",
@@ -1591,12 +1533,6 @@ def run_mode(
             "case_id": case_id,
             "profile": mode,
             "perseus_enabled": enabled,
-            "verification_critic": critic,
-            "speculative_depth": 2 if enabled and os.environ.get("PERSEUS_DEPTH2") == "1" else 1,
-            "canonical_tool_state": (
-                os.environ.get("PERSEUS_DEPTH2") == "1"
-                or os.environ.get("PERSEUS_CANONICAL_TOOL_STATE") == "1"
-            ),
             "agent_execution_seconds": agent_seconds,
             "returncode": returncode,
             "answer": answer,
@@ -1615,7 +1551,6 @@ def run_mode(
             },
             "native": bridge_result if benchmark.id in NATIVE_EPISODE_BENCHMARKS | TASK_BENCHMARKS else None,
             "speculation": mechanism_counts(trace),
-            "speculation_metrics": speculation_metrics(trace),
             "parse_health": {
                 "event_rows": len(events),
                 "malformed_event_rows": malformed_events,
@@ -1664,11 +1599,7 @@ def main() -> None:
     parser.add_argument("--harnesseval-root", type=Path, required=True)
     parser.add_argument("--orch-root", type=Path)
     parser.add_argument("--image", default="perseus:harnesseval-smoke")
-    parser.add_argument(
-        "--mode",
-        choices=("both", "perseus", "actor-only", "critic-pair", "perseus-critic"),
-        default="both",
-    )
+    parser.add_argument("--mode", choices=("both", "perseus", "actor-only"), default="both")
     args = parser.parse_args()
 
     required = ("PERSEUS_ACTOR_MODEL", "PERSEUS_ACTOR_BASE_URL", "PERSEUS_ACTOR_API_KEY")
@@ -1698,16 +1629,7 @@ def main() -> None:
         else platform._prepare_bridge_case(benchmark, args.case, args.run_dir)
     )
     extension = Path(__file__).resolve().with_name("tool_bridge_extension.ts")
-    if args.mode == "both":
-        modes = [(True, False), (False, False)]
-    elif args.mode == "critic-pair":
-        modes = [(True, True), (True, False)]
-    elif args.mode == "perseus-critic":
-        modes = [(True, True)]
-    elif args.mode == "perseus":
-        modes = [(True, False)]
-    else:
-        modes = [(False, False)]
+    modes = [True, False] if args.mode == "both" else [args.mode == "perseus"]
     implementation = product_implementation_identity(platform, args.image)
     results = [
         run_mode(
@@ -1719,9 +1641,8 @@ def main() -> None:
             image=args.image,
             extension=extension,
             enabled=enabled,
-            critic=critic,
         )
-        for enabled, critic in modes
+        for enabled in modes
     ]
     for result in results:
         result["implementation"] = implementation
@@ -1740,13 +1661,9 @@ def main() -> None:
         )
     pair_results = list(results)
     counterpart_note = None
-    if args.mode not in {"both", "critic-pair"}:
+    if args.mode != "both":
         case_slug = args.case.replace("/", "_").replace(":", "_")
-        counterpart = {
-            "perseus": "actor-only",
-            "actor-only": "perseus",
-            "perseus-critic": "perseus",
-        }[args.mode]
+        counterpart = "actor-only" if args.mode == "perseus" else "perseus"
         counterpart_path = args.run_dir.resolve() / benchmark.id / case_slug / counterpart / "result.json"
         if counterpart_path.is_file():
             stored = json.loads(counterpart_path.read_text(encoding="utf-8"))
@@ -1757,19 +1674,14 @@ def main() -> None:
                     f"Ignored {counterpart_path}: implementation identity differs; "
                     "run both modes under one pinned implementation to form a matched pair"
                 )
-    profile_order = {"perseus-critic": 0, "perseus": 1, "actor-only": 2}
-    pair_results.sort(key=lambda item: profile_order.get(str(item.get("profile")), 9))
+    pair_results.sort(key=lambda item: 0 if item.get("profile") == "perseus" else 1)
     pair = {
         "schema_version": 1,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "benchmark": benchmark.id,
         "case_id": args.case,
         "matched_variables": ["case", "prompt", "tools", "actor model", "thinking", "network"],
-        "independent_variable": (
-            "PERSEUS_CRITIC"
-            if args.mode in {"critic-pair", "perseus-critic"}
-            else "PERSEUS_ENABLED"
-        ),
+        "independent_variable": "PERSEUS_ENABLED",
         "implementation": implementation,
         "counterpart_note": counterpart_note,
         "results": pair_results,

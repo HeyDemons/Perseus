@@ -60,43 +60,6 @@ def assistant_text(events: list[dict[str, Any]]) -> str:
     return texts[-1] if texts else ""
 
 
-def speculation_metrics(trace: list[dict[str, Any]]) -> dict[str, float | int]:
-    savings = [row for row in trace if row.get("event") == "speculation_saved"]
-    continuation_savings = [
-        row for row in trace if row.get("event") == "continuation_saved"
-    ]
-    continuation_calls = [
-        row for row in trace if row.get("event") == "continuation_completed"
-    ]
-
-    def total(field: str) -> float:
-        return sum(
-            float(row[field])
-            for row in savings
-            if isinstance(row.get(field), (int, float))
-        )
-
-    return {
-        "resolved_hits": len(savings),
-        "saved_ms_total": total("savedMs"),
-        "tool_latency_ms_total": total("toolLatencyMs"),
-        "head_start_ms_total": total("headStartMs"),
-        "waited_ms_total": total("waitedMs"),
-        "continuation_calls": len(continuation_calls),
-        "continuation_hits": len(continuation_savings),
-        "continuation_saved_ms_total": sum(
-            float(row["savedMs"])
-            for row in continuation_savings
-            if isinstance(row.get("savedMs"), (int, float))
-        ),
-        "continuation_tokens_total": sum(
-            int((row.get("usage") or {}).get("totalTokens") or 0)
-            for row in continuation_calls
-            if isinstance(row.get("usage"), dict)
-        ),
-    }
-
-
 def require_job_path(value: str) -> Path:
     path = Path(value).resolve()
     if not path.is_relative_to(JOB_ROOT.resolve()):
@@ -217,24 +180,8 @@ def run(request_path: Path) -> int:
             ),
             "model": environment.get("PERSEUS_SPECULATOR_MODEL", environment.get("PERSEUS_ACTOR_MODEL", "")),
             "top_k": int(environment.get("PERSEUS_TOP_K", "3")),
-            "thinking": environment.get("PERSEUS_SPECULATOR_THINKING", "off"),
-            "min_confidence": float(environment.get("PERSEUS_SPECULATOR_MIN_CONFIDENCE", "0.5")),
-            "max_miss_turns": int(environment.get("PERSEUS_SPECULATOR_MAX_MISS_TURNS", "4")),
-            "cooldown_turns": int(environment.get("PERSEUS_SPECULATOR_COOLDOWN_TURNS", "4")),
-            "max_tokens": int(environment.get("PERSEUS_SPECULATOR_MAX_TOKENS", "256")),
-            "timeout_ms": int(environment.get("PERSEUS_SPECULATOR_TIMEOUT_MS", "5000")),
-            "context_messages": int(environment.get("PERSEUS_SPECULATOR_CONTEXT_MESSAGES", "6")),
-            "depth": 2 if environment.get("PERSEUS_DEPTH2") == "1" else 1,
-            "canonical_tool_state": (
-                environment.get("PERSEUS_DEPTH2") == "1"
-                or environment.get("PERSEUS_CANONICAL_TOOL_STATE") == "1"
-            ),
-            "depth2_min_confidence": float(environment.get("PERSEUS_DEPTH2_MIN_CONFIDENCE", "0.9")),
-            "verification_critic": environment.get("PERSEUS_CRITIC") == "1",
-            "critic_max_passes": int(environment.get("PERSEUS_CRITIC_MAX_PASSES", "1")),
             "safe_tools": safe_tools,
             "events": mechanism_counts,
-            "metrics": speculation_metrics(trace),
         },
         "tools": {"calls": len(tool_starts), "names": tool_names},
         "artifacts": {

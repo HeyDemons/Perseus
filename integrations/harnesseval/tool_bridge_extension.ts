@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import { request as httpRequest } from "node:http";
-import { posix as posixPath } from "node:path";
 
 type ToolEntry = {
 	name: string;
@@ -27,30 +26,6 @@ type ToolContent =
 
 const WIRE_IMAGE_MARKER = "_harnesseval_image";
 const DECLARATION_ONLY_LIFECYCLE = "single_turn_declaration_only";
-const SCRIPT_INTERPRETERS = new Set(["python", "python3", "node", "bash", "sh"]);
-
-export function normalizeToolArguments(tool: string, arguments_: Record<string, unknown>): Record<string, unknown> {
-	if (tool !== "run_command") return arguments_;
-	const argv = arguments_.argv;
-	const cwd = typeof arguments_.cwd === "string" ? posixPath.normalize(arguments_.cwd) : undefined;
-	if (!Array.isArray(argv) || !argv.every((item) => typeof item === "string")) {
-		return cwd === undefined ? arguments_ : { ...arguments_, cwd };
-	}
-	const normalized = [...argv];
-	const interpreter = posixPath.basename(normalized[0] || "");
-	const script = normalized[1];
-	if (
-		cwd?.startsWith("/") &&
-		SCRIPT_INTERPRETERS.has(interpreter) &&
-		typeof script === "string" &&
-		!script.startsWith("-") &&
-		!script.startsWith("/") &&
-		script.includes("/")
-	) {
-		normalized[1] = posixPath.resolve(cwd, script);
-	}
-	return { ...arguments_, argv: normalized, ...(cwd === undefined ? {} : { cwd }) };
-}
 
 export function postJsonDirect(url: string, payload: Record<string, unknown>): Promise<{ ok: boolean; payload: any }> {
 	const body = JSON.stringify(payload);
@@ -164,9 +139,6 @@ export default function harnessevalToolBridge(api: any) {
 			label: entry.name,
 			description: entry.description || `HarnessEval tool ${entry.name}`,
 			parameters: entry.parameters || { type: "object", properties: {} },
-			prepareArguments(params: Record<string, unknown>) {
-				return normalizeToolArguments(entry.name, params ?? {});
-			},
 			async execute(toolCallId: string, params: Record<string, unknown>) {
 				if (declarationOnly) return declarationOnlyToolResult(entry.name, params ?? {});
 				try {
@@ -177,19 +149,12 @@ export default function harnessevalToolBridge(api: any) {
 					});
 					const payload = response.payload;
 					const speculationId = payload?._harnesseval_speculation_id;
-					const speculationRejected = payload?._harnesseval_speculation_rejected === true;
 					const visiblePayload = { ...payload };
 					delete visiblePayload._harnesseval_speculation_id;
-					delete visiblePayload._harnesseval_speculation_rejected;
 					return {
 						content: toolResultContent(visiblePayload),
 						details:
-							speculationRejected
-								? {
-									perseusSpeculationRejected: true,
-									reason: typeof payload?.error === "string" ? payload.error : "snapshot_rejected",
-								}
-								: typeof speculationId === "string"
+							typeof speculationId === "string"
 								? {
 									harnessevalSpeculation: {
 										id: speculationId,
@@ -198,7 +163,7 @@ export default function harnessevalToolBridge(api: any) {
 									},
 								}
 								: {},
-						isError: speculationRejected || !response.ok || payload?.ok === false,
+						isError: !response.ok || payload?.ok === false,
 					};
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);

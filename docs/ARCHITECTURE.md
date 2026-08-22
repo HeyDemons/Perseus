@@ -7,14 +7,12 @@ starts two paths concurrently:
 
 1. The authoritative Actor reasons over the task, complete observations, and
    registered tool schemas.
-2. The Speculator streams up to `top-k` complete tool calls from the same
-   snapshot. Candidates describe calls that may coexist in the Actor's next
-   batch rather than mutually exclusive whole-batch alternatives.
+2. The Speculator predicts up to `top-k` complete tool calls from the same
+   snapshot.
 3. The runtime validates candidate schemas and admits only explicitly safe tool
    names to the speculative frontier.
-4. Each admitted candidate executes as an isolated future as soon as its
-   NDJSON row validates; the runtime does not wait for the remaining frontier.
-   Results are not appended to Actor memory.
+4. Admitted candidates execute as isolated futures. Their results are not
+   appended to Actor memory.
 5. When the Actor emits a tool call, the runtime canonicalizes its structured
    arguments and checks the frontier.
 6. An exact match claims the corresponding future. A miss executes the Actor
@@ -24,32 +22,6 @@ starts two paths concurrently:
 
 This topology overlaps prediction, model latency, and safe tool latency without
 adding a manager barrier before the Actor can act.
-
-## Optional Depth-Two Continuation
-
-The default remains the strict single-step protocol above. With
-`PERSEUS_DEPTH2=1`, one high-confidence safe candidate may additionally seed a
-detached next-Actor request after its tool result resolves. Tool-use turns are
-projected to canonical calls/results for both the enabled arm and its matched
-control. The detached response is committed only if the actual next provider
-context has the exact same canonical key; otherwise it is aborted and the
-normal Actor request runs.
-
-Canonical projection omits non-tool text on tool-use turns. Consequently this
-mode is an explicit experimental variant, not a claim of byte-identical
-transcript semantics relative to the default loop.
-
-## Verification Critic Variant
-
-The default Actor accepts its first final answer. The opt-in
-`perseus-critic` variant instead inserts one user-visible verification gate
-after a tool-using run first attempts to stop. The same Actor must execute the
-strongest available task-specific checks, inspect failures, repair the
-artifact when necessary, and then answer again. The gate is bounded by
-`PERSEUS_CRITIC_MAX_PASSES` and does not use a separate critic model.
-
-This variant targets task success rather than lossless latency. Its results,
-tokens, turns, and wall time must be compared separately from PERSEUS.
 
 ## Why It Is A Swarm
 

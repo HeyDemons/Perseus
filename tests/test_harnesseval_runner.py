@@ -21,44 +21,6 @@ SPEC.loader.exec_module(runner)
 
 
 class HarnessEvalRunnerTests(unittest.TestCase):
-    def test_speculation_metrics_sum_only_resolved_hit_savings(self) -> None:
-        trace = [
-            {"event": "cache_hit"},
-            {
-                "event": "speculation_saved",
-                "savedMs": 80,
-                "toolLatencyMs": 120,
-                "headStartMs": 80,
-                "waitedMs": 40,
-            },
-            {
-                "event": "speculation_saved",
-                "savedMs": 150.5,
-                "toolLatencyMs": 150.5,
-                "headStartMs": 300,
-                "waitedMs": 0,
-            },
-            {
-                "event": "continuation_completed",
-                "usage": {"totalTokens": 321},
-            },
-            {"event": "continuation_saved", "savedMs": 750},
-        ]
-        self.assertEqual(
-            runner.speculation_metrics(trace),
-            {
-                "resolved_hits": 2,
-                "saved_ms_total": 230.5,
-                "tool_latency_ms_total": 270.5,
-                "head_start_ms_total": 380.0,
-                "waited_ms_total": 40.0,
-                "continuation_calls": 1,
-                "continuation_hits": 1,
-                "continuation_saved_ms_total": 750.0,
-                "continuation_tokens_total": 321,
-            },
-        )
-
     def test_terminal_phase_timeout_reserves_verifier_budget(self) -> None:
         with mock.patch.object(runner.time, "monotonic", return_value=100.0):
             self.assertEqual(

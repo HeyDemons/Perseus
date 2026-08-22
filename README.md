@@ -14,7 +14,7 @@ remains the single authority for tool selection, mutations, and final output.
 
 ## Properties
 
-- asynchronous, NDJSON-streamed `top-k` batch prediction on eligible Actor turns;
+- asynchronous `top-k` frontier prediction on every ordinary Actor turn;
 - explicit safe-tool allowlist before any speculative execution;
 - canonical tool-name and structured-argument matching;
 - single execution on a hit and authoritative fallback on a miss;
@@ -71,44 +71,7 @@ Speculator inherits it unless `PERSEUS_SPECULATOR_USER_AGENT` is set.
 The Speculator uses the Actor endpoint by default. Configure the
 `PERSEUS_SPECULATOR_*` variables to use a faster compatible endpoint. Keep
 `PERSEUS_SAFE_TOOLS` limited to actions whose early execution is semantically
-safe, such as reads and searches. The Speculator defaults to `off` thinking,
-admits candidates with confidence at least `0.5`, and opens a four-turn
-cooldown after four consecutive miss-only turns. Override these policies with
-`PERSEUS_SPECULATOR_THINKING`, `PERSEUS_SPECULATOR_MIN_CONFIDENCE`,
-`PERSEUS_SPECULATOR_MAX_MISS_TURNS`, and
-`PERSEUS_SPECULATOR_COOLDOWN_TURNS`. Exact hits emit a `speculation_saved`
-trace row with measured head start, tool latency, and critical-path time saved.
-Prediction output and wall time default to 256 tokens and 5000ms; both remain
-configurable through `PERSEUS_SPECULATOR_MAX_TOKENS` and
-`PERSEUS_SPECULATOR_TIMEOUT_MS`.
-Each validated NDJSON row reaches the runtime immediately, so a high-confidence
-batch member can start before the Speculator finishes generating the remaining
-candidates. Promise-array controllers remain supported for extension
-compatibility.
-To keep prediction cheaper than Actor reasoning, the Speculator receives only
-the six most recent converted messages plus the tool catalog by default; it
-does not duplicate the full Actor system prompt. Override the message window
-with `PERSEUS_SPECULATOR_CONTEXT_MESSAGES`.
-
-An experimental depth-two variant is available behind `PERSEUS_DEPTH2=1`.
-It projects tool-use turns to canonical tool calls/results for both PERSEUS and
-its matched Actor-only control, prelaunches at most one high-confidence next
-Actor call, and commits it only when the projected provider context matches
-exactly. `PERSEUS_DEPTH2_MIN_CONFIDENCE` defaults to `0.9`.
-
-Depth two is deliberately opt-in: canonical projection removes non-tool text
-from tool-use turns at the provider boundary, so it is a distinct measured
-variant rather than the strict transcript-preserving PERSEUS configuration.
-Set `PERSEUS_CANONICAL_TOOL_STATE=1` without depth two to run its matched
-projection-only control.
-
-`PERSEUS_CRITIC=1` enables a separate correctness-oriented variant. After a
-tool-using run first tries to finalize, the runtime inserts one verification
-gate that requires the Actor to run task-specific checks, inspect failures,
-and correct the artifact before producing the accepted final answer.
-`PERSEUS_CRITIC_MAX_PASSES` defaults to one. This mode intentionally changes
-the trajectory and is reported as `perseus-critic`; it is not part of the
-lossless latency-only PERSEUS contract.
+safe, such as reads and searches.
 
 ## Verify
 
