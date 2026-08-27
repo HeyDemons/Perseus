@@ -21,14 +21,6 @@ SPEC.loader.exec_module(runner)
 
 
 class HarnessEvalRunnerTests(unittest.TestCase):
-    def test_terminal_phase_timeout_reserves_verifier_budget(self) -> None:
-        with mock.patch.object(runner.time, "monotonic", return_value=100.0):
-            self.assertEqual(
-                runner.bounded_phase_timeout(900.0, 590.0, reserve_sec=120.0),
-                370.0,
-            )
-            self.assertEqual(runner.bounded_phase_timeout(900.0, None), 900.0)
-
     def test_attempt_directories_are_immutable_and_monotonic(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "mode"

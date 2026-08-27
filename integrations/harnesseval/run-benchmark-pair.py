@@ -50,36 +50,6 @@ HOST_GATEWAY_OVERRIDE_ENV = "HARNESSEVAL_DOCKER_HOST_GATEWAY"
 DECLARATION_ONLY_LIFECYCLE = "single_turn_declaration_only"
 
 
-def arm_timeout_sec() -> float | None:
-    raw = os.environ.get("HARNESS_ARM_TIMEOUT_S", "").strip()
-    if not raw:
-        return None
-    value = float(raw)
-    if value <= 0:
-        raise ValueError("HARNESS_ARM_TIMEOUT_S must be positive")
-    return value
-
-
-def bounded_phase_timeout(
-    requested: float,
-    deadline: float | None,
-    *,
-    reserve_sec: float = 0.0,
-) -> float:
-    if deadline is None:
-        return requested
-    return max(0.001, min(requested, deadline - time.monotonic() - reserve_sec))
-
-
-def terminal_verifier_reserve_sec(total_timeout_sec: float | None) -> float:
-    if total_timeout_sec is None:
-        return 0.0
-    configured = float(os.environ.get("TERMINAL_BENCH_VERIFIER_RESERVE_S", "120"))
-    if configured < 0:
-        raise ValueError("TERMINAL_BENCH_VERIFIER_RESERVE_S must be non-negative")
-    return min(configured, total_timeout_sec / 2)
-
-
 def product_working_directory(benchmark_id: str) -> str:
     if benchmark_id in STATIC_BENCHMARKS:
         # The product container mounts mode_dir at /job; the static bridge copied the
@@ -1011,7 +981,6 @@ def finalize_task(
     case_id: str,
     mode_dir: Path,
     handle: ToolServerHandle,
-    arm_deadline: float | None = None,
 ) -> dict[str, Any]:
     assert handle.task_container is not None
     context = handle.context or {}
@@ -1028,9 +997,7 @@ def finalize_task(
                 container=handle.task_container,
                 task_dir=task_dir,
                 logs_dir=logs,
-                timeout_sec=bounded_phase_timeout(
-                    float(settings.verifier_timeout_sec), arm_deadline
-                ),
+                timeout_sec=float(settings.verifier_timeout_sec),
                 log=log,
                 prefix="[terminal-bench-2:verifier] ",
                 verifier_env={
@@ -1126,13 +1093,6 @@ def run_mode(
     extension: Path,
     enabled: bool,
 ) -> dict[str, Any]:
-    total_arm_timeout_sec = arm_timeout_sec()
-    arm_deadline = (
-        time.monotonic() + total_arm_timeout_sec
-        if total_arm_timeout_sec is not None
-        else None
-    )
-    verifier_reserve_sec = terminal_verifier_reserve_sec(total_arm_timeout_sec)
     mode = "perseus" if enabled else "actor-only"
     mode_root = (
         run_dir / benchmark.id / case_id.replace("/", "_").replace(":", "_") / mode
@@ -1187,11 +1147,7 @@ def run_mode(
         safe_tools: list[str] = []
         turn = 0
         agent_timeout_sec = (
-            bounded_phase_timeout(
-                float((handle.context or {})["settings"].agent_timeout_sec),
-                arm_deadline,
-                reserve_sec=verifier_reserve_sec,
-            )
+            float((handle.context or {})["settings"].agent_timeout_sec)
             if benchmark.id == "terminal-bench-2"
             else None
         )
