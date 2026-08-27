@@ -1428,7 +1428,6 @@ def run_mode(
                     case_id=case_id,
                     mode_dir=mode_dir,
                     handle=handle,
-                    arm_deadline=arm_deadline,
                 )
             )
         elif bridge_error:
