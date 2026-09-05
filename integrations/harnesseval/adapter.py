@@ -179,6 +179,11 @@ def run(request_path: Path) -> int:
                 environment.get("PERSEUS_ACTOR_PROVIDER", "openai-compatible"),
             ),
             "model": environment.get("PERSEUS_SPECULATOR_MODEL", environment.get("PERSEUS_ACTOR_MODEL", "")),
+            # Unset means the Speculator matched the Actor, which is the runtime's own default.
+            "thinking": environment.get(
+                "PERSEUS_SPECULATOR_THINKING",
+                environment.get("PERSEUS_ACTOR_THINKING", "high"),
+            ),
             "top_k": int(environment.get("PERSEUS_TOP_K", "3")),
             "safe_tools": safe_tools,
             "events": mechanism_counts,

@@ -78,6 +78,8 @@ function isImageContentBlock(block: { type: string }): block is ImageContent {
 export interface OpenAICompletionsOptions extends StreamOptions {
 	toolChoice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } };
 	reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh";
+	/** The caller explicitly asked for thinking off, as opposed to leaving it unset. */
+	reasoningDisabled?: boolean;
 }
 
 interface OpenAICompatCacheControl {
@@ -435,12 +437,17 @@ export const streamSimpleOpenAICompletions: StreamFunction<"openai-completions",
 
 	const base = buildBaseOptions(model, options, apiKey);
 	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
+	// Omitting reasoning_effort is not the same as disabling thinking: an OpenAI-compatible
+	// endpoint applies its own default, which is commonly thinking-on. Every other provider
+	// expresses "off" as a real disable, so an explicit "off" sends the off value here too.
+	// An unset field still omits the parameter, which keeps the provider default intact.
 	const reasoningEffort = clampedReasoning === "off" ? undefined : clampedReasoning;
 	const toolChoice = (options as OpenAICompletionsOptions | undefined)?.toolChoice;
 
 	return streamOpenAICompletions(model, context, {
 		...base,
 		reasoningEffort,
+		reasoningDisabled: clampedReasoning === "off",
 		toolChoice,
 	} satisfies OpenAICompletionsOptions);
 };
@@ -500,7 +507,7 @@ function createClient(
 	});
 }
 
-function buildParams(
+export function buildParams(
 	model: Model<"openai-completions">,
 	context: Context,
 	options?: OpenAICompletionsOptions,
@@ -605,7 +612,10 @@ function buildParams(
 		// OpenAI-style reasoning_effort
 		(params as any).reasoning_effort = model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
 	} else if (!options?.reasoningEffort && model.reasoning && compat.supportsReasoningEffort) {
-		const offValue = model.thinkingLevelMap?.off;
+		// A model may name its own off value, including null for "send nothing". Without one,
+		// only an explicit disable sends "none"; an unset level keeps the provider default.
+		const mappedOff = model.thinkingLevelMap?.off;
+		const offValue = mappedOff !== undefined ? mappedOff : options?.reasoningDisabled ? "none" : undefined;
 		if (typeof offValue === "string") {
 			(params as any).reasoning_effort = offValue;
 		}

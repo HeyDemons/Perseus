@@ -196,7 +196,12 @@ export type ProviderImagesOptions = ImagesOptions & Record<string, unknown>;
 
 // Unified options with reasoning passed to streamSimple() and completeSimple()
 export interface SimpleStreamOptions extends StreamOptions {
-	reasoning?: ThinkingLevel;
+	/**
+	 * Requested thinking level. "off" is an explicit request to disable thinking, which is
+	 * not the same as omitting the field: omitting leaves the choice to the provider default,
+	 * and an OpenAI-compatible endpoint's default is commonly thinking-on.
+	 */
+	reasoning?: ModelThinkingLevel;
 	/** Custom token budgets for thinking levels (token-based providers only) */
 	thinkingBudgets?: ThinkingBudgets;
 }

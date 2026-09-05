@@ -7,10 +7,15 @@ import type {
 	SpeculativeActionsController,
 	SpeculativeActionTraceEvent,
 } from "@earendil-works/pi-agent-core";
-import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 
 export interface PerseusControllerOptions {
 	model: Model<any>;
+	/**
+	 * Thinking level for the Speculator, "off" included. Unset means the Actor's own level:
+	 * the Speculator is a prediction of the Actor, so matching it is the neutral default.
+	 */
+	thinkingLevel?: ModelThinkingLevel;
 	topK?: number;
 	maxTokens?: number;
 	timeoutMs?: number;
@@ -30,6 +35,7 @@ class PerseusController implements SpeculativeActionsController {
 	private readonly maxTokens?: number;
 	private readonly timeoutMs?: number;
 	private readonly safeTools: Set<string>;
+	private readonly thinkingLevel?: ModelThinkingLevel;
 	private readonly traceFile?: string;
 	private recoverActorWithoutSpeculation = false;
 
@@ -46,6 +52,7 @@ class PerseusController implements SpeculativeActionsController {
 				? options.timeoutMs
 				: undefined;
 		this.safeTools = new Set(Array.from(options.safeTools, (name) => name.trim()).filter(Boolean));
+		this.thinkingLevel = options.thinkingLevel;
 		this.traceFile = options.traceFile ? resolve(options.traceFile) : undefined;
 	}
 
@@ -157,7 +164,7 @@ class PerseusController implements SpeculativeActionsController {
 				{
 					signal,
 					...(this.maxTokens === undefined ? {} : { maxTokens: this.maxTokens }),
-					reasoning: undefined,
+					reasoning: this.thinkingLevel ?? input.thinkingLevel,
 				},
 			);
 			for await (const _event of stream) {

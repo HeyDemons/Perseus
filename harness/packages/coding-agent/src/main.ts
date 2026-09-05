@@ -90,6 +90,17 @@ function reportDiagnostics(diagnostics: readonly AgentSessionRuntimeDiagnostic[]
 	}
 }
 
+const SPECULATOR_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+
+type SpeculatorThinkingLevel = (typeof SPECULATOR_THINKING_LEVELS)[number];
+
+/** "none" is the wire value an OpenAI-compatible endpoint uses for off; accept both spellings. */
+function resolveSpeculatorThinkingLevel(value: string | undefined): SpeculatorThinkingLevel | undefined {
+	if (!value) return undefined;
+	const normalized = value === "none" ? "off" : value;
+	return SPECULATOR_THINKING_LEVELS.find((level) => level === normalized);
+}
+
 function isTruthyEnvFlag(value: string | undefined): boolean {
 	if (!value) return false;
 	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
@@ -665,6 +676,16 @@ export async function main(args: string[], options?: MainOptions) {
 					message: "PERSEUS has no benchmark-declared safe tools; this task will run on the Actor-only path",
 				});
 			} else {
+				// Unset means the Speculator thinks exactly like the Actor: it predicts the Actor,
+				// so anything else is a deliberate asymmetry the operator has to ask for.
+				const requestedThinking = process.env.PERSEUS_SPECULATOR_THINKING?.trim().toLowerCase();
+				const speculatorThinkingLevel = resolveSpeculatorThinkingLevel(requestedThinking);
+				if (requestedThinking && speculatorThinkingLevel === undefined) {
+					diagnostics.push({
+						type: "warning",
+						message: `Ignoring PERSEUS_SPECULATOR_THINKING=${requestedThinking}; expected one of ${SPECULATOR_THINKING_LEVELS.join(", ")}. The Speculator will match the Actor.`,
+					});
+				}
 				const configuredSpeculatorMaxTokens = Number.parseInt(
 					process.env.PERSEUS_SPECULATOR_MAX_TOKENS || "",
 					10,
@@ -675,6 +696,7 @@ export async function main(args: string[], options?: MainOptions) {
 				);
 				speculativeActions = createPerseusController({
 					model: speculatorModel,
+					thinkingLevel: speculatorThinkingLevel,
 					topK: Number.parseInt(process.env.PERSEUS_TOP_K || "3", 10),
 					maxTokens:
 						Number.isFinite(configuredSpeculatorMaxTokens) && configuredSpeculatorMaxTokens > 0

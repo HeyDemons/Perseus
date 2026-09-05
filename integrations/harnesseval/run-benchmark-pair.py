@@ -37,6 +37,7 @@ API_ENV = (
     "PERSEUS_SPECULATOR_API_TYPE",
     "PERSEUS_SPECULATOR_API_KEY",
     "PERSEUS_SPECULATOR_USER_AGENT",
+    "PERSEUS_SPECULATOR_THINKING",
     "PERSEUS_TOP_K",
     "PERSEUS_SPECULATOR_MAX_TOKENS",
     "PERSEUS_SPECULATOR_TIMEOUT_MS",
@@ -719,6 +720,15 @@ def _start_tool_server(
             else "benchmark_platform.bridges.tau_product_server"
         )
         policy = {"native_evaluate": True}
+        # The benchmark's dataset language has to be the same one the baseline arms ran, or
+        # the two sides of the comparison are graded on different tasks in different
+        # environments. This path never receives the harness policy -- there is no --policy
+        # flag -- so it reads the same variable bench_runtime.benchmark_policy reads, and
+        # records the result in the policy it does send. Unset leaves the choice to the
+        # benchmark's own default, exactly as the bridge does.
+        if language := os.environ.get("VITABENCH_LANGUAGE", "").strip():
+            if benchmark.id == "vitabench":
+                policy["language"] = language
         command.extend(
             [
                 "-e", "HARNESS_API_BASE", "-e", "HARNESS_API_TYPE",
