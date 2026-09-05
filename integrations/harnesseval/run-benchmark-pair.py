@@ -496,47 +496,15 @@ def scorer_answer(benchmark_id: str, answer: str) -> str:
 
 
 def actor_metrics(events: list[dict[str, Any]]) -> dict[str, Any]:
-    calls: list[dict[str, Any]] = []
-    rounds = 0
-    usage = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "total": 0}
-    last_stop_reason = None
-    last_error = None
-    for event in events:
-        if event.get("type") != "message_end":
-            continue
-        message = event.get("message")
-        if not isinstance(message, dict) or message.get("role") != "assistant":
-            continue
-        rounds += 1
-        last_stop_reason = message.get("stopReason")
-        last_error = message.get("errorMessage")
-        for item in message.get("content") or []:
-            if isinstance(item, dict) and item.get("type") == "toolCall":
-                calls.append(
-                    {
-                        "id": str(item.get("id") or ""),
-                        "name": str(item.get("name") or ""),
-                        "arguments": item.get("arguments") if isinstance(item.get("arguments"), dict) else {},
-                    }
-                )
-        raw_usage = message.get("usage") or {}
-        for source, target in (
-            ("input", "input"),
-            ("output", "output"),
-            ("cacheRead", "cache_read"),
-            ("cacheWrite", "cache_write"),
-            ("totalTokens", "total"),
-        ):
-            value = raw_usage.get(source)
-            if isinstance(value, (int, float)):
-                usage[target] += value
-    return {
-        "rounds": rounds,
-        "committed_calls": calls,
-        "usage": usage,
-        "last_stop_reason": last_stop_reason,
-        "last_error": last_error,
-    }
+    # Use the same reporting contract as the baseline. This host runner already
+    # loads HarnessEval through --harnesseval-root in main().
+    try:
+        from benchmark_platform.measurement import product_actor_metrics
+    except ModuleNotFoundError:
+        # Also support direct local parser tests beside the HarnessEval checkout.
+        sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "HarnessEval"))
+        from benchmark_platform.measurement import product_actor_metrics
+    return product_actor_metrics(events)
 
 
 def first_assistant_tool_calls(events: list[dict[str, Any]]) -> list[dict[str, Any]]:

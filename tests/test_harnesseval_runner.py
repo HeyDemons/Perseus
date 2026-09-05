@@ -21,6 +21,21 @@ SPEC.loader.exec_module(runner)
 
 
 class HarnessEvalRunnerTests(unittest.TestCase):
+    def test_actor_metrics_counts_responses_and_preserves_disjoint_cache(self) -> None:
+        message = {"role": "assistant", "stopReason": "toolUse", "content": [
+            {"type": "toolCall", "name": "lookup", "id": str(i), "arguments": {}} for i in range(2)],
+            "usage": {"input": 20, "output": 5, "cacheRead": 80, "cacheWrite": 10, "totalTokens": 115}}
+        metrics = runner.actor_metrics([
+            {"type": "message_end", "message": message},
+            {"type": "turn_end", "message": message},
+            {"type": "message_end", "message": {"role": "assistant", "stopReason": "aborted", "usage": {}}},
+        ])
+        self.assertEqual(metrics["rounds"], 1)
+        self.assertEqual(len(metrics["committed_calls"]), 2)
+        self.assertEqual(metrics["usage"]["total"], 25)
+        self.assertEqual(metrics["usage"]["cache_read"], 80)
+        self.assertEqual(metrics["usage_missing_requests"], 1)
+
     def test_attempt_directories_are_immutable_and_monotonic(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "mode"
